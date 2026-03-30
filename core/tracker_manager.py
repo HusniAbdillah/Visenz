@@ -1,573 +1,678 @@
 """
-Multi-camera tracker manager with Wi-Fi lag prevention and state machine line crossing.
-Implements ThreadedVideoReader for buffering prevention and crossing state machine.
+Supervision-based tracker manager for edge-vision-counter V2.
+Pure AI and annotation logic using supervision library.
+Strictly decoupled from video capture - takes ThreadedVideoReader and StateManager instances.
 """
 
 import logging
 import threading
 import time
-import queue
-from typing import Dict, Optional, Tuple, List
+from typing import Dict, List, Optional, Tuple, Any
+
 import cv2
 import numpy as np
+import supervision as sv
+from supervision.draw.color import Color, ColorPalette
 
 import config
 from core.detector import VisionModel
+from core.video_reader import ThreadedVideoReader
+from core.state_manager import StateManager
 
 logger = logging.getLogger(__name__)
 
 
-class ThreadedVideoReader:
+class SupervisionTracker:
     """
-    Threaded video capture to prevent Wi-Fi TCP buffer lag.
-    Continuously reads frames and keeps ONLY the latest frame available.
-    Discards old frames to ensure the inference thread always gets fresh data.
-    """
-
-    def __init__(self, camera_url: str, buffer_size: int = 1) -> None:
-        """
-        Initialize threaded video reader.
-
-        Args:
-            camera_url: Video source URL or device index
-            buffer_size: OpenCV buffer size (1 = critical for Wi-Fi sources)
-        """
-        self.camera_url = camera_url
-        self.cap: Optional[cv2.VideoCapture] = None
-        self.latest_frame: Optional[np.ndarray] = None
-        self.frame_lock = threading.Lock()
-        self.running = False
-        self.reader_thread: Optional[threading.Thread] = None
-        self.connected = False
-        self._buffer_size = buffer_size
-
-    def start(self) -> bool:
-        """
-        Start the background reading thread.
-
-        Returns:
-            True if connection successful, False otherwise.
-        """
-        try:
-            logger.info("Opening video source: %s", self.camera_url)
-            self.cap = cv2.VideoCapture(self.camera_url)
-
-            if not self.cap.isOpened():
-                logger.error("Failed to open camera: %s", self.camera_url)
-                return False
-
-            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, self._buffer_size)
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.CAMERA_FRAME_WIDTH)
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.CAMERA_FRAME_HEIGHT)
-            self.cap.set(cv2.CAP_PROP_FPS, config.CAMERA_FPS)
-
-            self.running = True
-            self.connected = True
-            self.reader_thread = threading.Thread(target=self._read_loop, daemon=True)
-            self.reader_thread.start()
-
-            logger.info("Video reader started for: %s", self.camera_url)
-            return True
-
-        except Exception as e:
-            logger.error("Failed to start video reader: %s", str(e))
-            self.connected = False
-            return False
-
-    def _read_loop(self) -> None:
-        """
-        Background thread loop: continuously read frames and keep only the latest.
-        Discards old frames to prevent buffer accumulation.
-        """
-        consecutive_failures = 0
-        max_consecutive_failures = 30
-
-        while self.running:
-            try:
-                ret, frame = self.cap.read()
-
-                if not ret:
-                    consecutive_failures += 1
-                    if consecutive_failures > max_consecutive_failures:
-                        logger.warning("Too many consecutive read failures. Reconnecting...")
-                        self._reconnect()
-                        consecutive_failures = 0
-                    time.sleep(0.01)
-                    continue
-
-                consecutive_failures = 0
-                with self.frame_lock:
-                    self.latest_frame = frame
-
-            except Exception as e:
-                logger.error("Error in video read loop: %s", str(e))
-                time.sleep(0.1)
-
-    def _reconnect(self) -> None:
-        """Attempt to reconnect to video source."""
-        try:
-            if self.cap:
-                self.cap.release()
-            time.sleep(2)
-            self.cap = cv2.VideoCapture(self.camera_url)
-            if self.cap.isOpened():
-                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, self._buffer_size)
-                self.connected = True
-                logger.info("Reconnected to: %s", self.camera_url)
-            else:
-                self.connected = False
-        except Exception as e:
-            logger.error("Reconnection failed: %s", str(e))
-            self.connected = False
-
-    def get_frame(self) -> Optional[np.ndarray]:
-        """
-        Get the latest available frame (non-blocking).
-
-        Returns:
-            Latest frame or None if no frame available
-        """
-        with self.frame_lock:
-            return self.latest_frame.copy() if self.latest_frame is not None else None
-
-    def stop(self) -> None:
-        """Stop the reader thread and release resources."""
-        logger.info("Stopping video reader for: %s", self.camera_url)
-        self.running = False
-
-        if self.reader_thread is not None:
-            self.reader_thread.join(timeout=2)
-
-        if self.cap is not None:
-            self.cap.release()
-
-        self.connected = False
-        logger.info("Video reader stopped")
-
-    def is_connected(self) -> bool:
-        """Return connection status."""
-        return self.connected
-
-
-class CrossingStateMachine:
-    """
-    FIXED State machine for robust line crossing detection.
-    CRITICAL FIXES:
-    1. Tracks which SIDE of the line each person is on (not just if they've crossed)
-    2. Allows BIDIRECTIONAL crossing (entry AND exit, even if they turn around)
-    3. Handles GHOST EXITS: Counts people leaving even if never seen entering (negative OK)
-
-    State tracking per ID:
-      tracked_states[id] = {
-        "last_side": "left" | "right" | None,
-        "has_crossed_in": bool,  # Flag to prevent double-entry
-        "has_crossed_out": bool, # Flag to prevent double-exit
-      }
-
-    Logic:
-    - Determine which side centroid is on relative to line
-    - If side changes AND direction matches in_direction, count as IN
-    - If side changes AND direction matches out_direction, count as OUT
-    - Allow both IN and OUT counts for same ID (bidirectional)
+    Supervision-based tracking and line crossing detection for a single camera.
+    
+    Features:
+    - Uses sv.ByteTrack for robust tracking with extended track buffer
+    - Uses sv.LineZone for line crossing detection
+    - Uses sv.BoxAnnotator, sv.LineZoneAnnotator, sv.TraceAnnotator for visualization
+    - Syncs crossing counts to StateManager
     """
 
     def __init__(
         self,
-        line_ratio: float,
-        orientation: str = "vertical",
-        in_direction: str = "left_to_right",
-    ) -> None:
-        """
-        Initialize line crossing state machine with STRICT state tracking.
-
-        Args:
-            line_ratio: Line position as ratio (0.0-1.0) of frame width/height
-            orientation: 'vertical' or 'horizontal'
-            in_direction: 'left_to_right', 'right_to_left', 'top_to_bottom', 'bottom_to_top'
-        """
-        self.line_ratio = line_ratio
-        self.orientation = orientation
-        self.in_direction = in_direction
-
-        # Derive out_direction from in_direction
-        self.out_direction = self._get_out_direction(in_direction)
-
-        # FIXED: Track position AND side state for each person
-        self.tracked_states: Dict[int, Dict] = {}  # {id: {"last_side": "left"|"right", "last_pos": (x,y), ...}}
-
-        self.total_in = 0
-        self.total_out = 0
-        self.lock = threading.RLock()
-
-    def _get_out_direction(self, in_direction: str) -> str:
-        """Derive the OUT direction from IN direction."""
-        opposite_map = {
-            "left_to_right": "right_to_left",
-            "right_to_left": "left_to_right",
-            "top_to_bottom": "bottom_to_top",
-            "bottom_to_top": "top_to_bottom",
-        }
-        return opposite_map.get(in_direction, "")
-
-    def _get_side(self, coordinate: float, line_pos: int) -> str:
-        """
-        Determine which side of the line a coordinate is on.
-        Returns: "left" (< line), "right" (>= line) for vertical
-                 "top" (< line), "bottom" (>= line) for horizontal
-        """
-        return "left" if coordinate < line_pos else "right"
-
-    def update(
-        self,
-        frame_shape: Tuple[int, int],
-        detections: dict,
-    ) -> Tuple[int, int]:
-        """
-        Update tracking state with new detections.
-        FIXED: Allows bidirectional crossing per ID.
-
-        Args:
-            frame_shape: (height, width) of frame
-            detections: Detection dict with 'ids' and 'centroids'
-
-        Returns:
-            Tuple of (new_in_count, new_out_count) since last update
-        """
-        frame_h, frame_w = frame_shape
-        new_in = 0
-        new_out = 0
-
-        if self.orientation == "vertical":
-            line_pos = int(self.line_ratio * frame_w)
-            coordinate_func = lambda c: c[0]  # Extract X for vertical
-        else:
-            line_pos = int(self.line_ratio * frame_h)
-            coordinate_func = lambda c: c[1]  # Extract Y for horizontal
-
-        ids = detections.get('ids', [])
-        centroids = detections.get('centroids', [])
-
-        if len(ids) == 0:
-            # Clean up lost IDs
-            if self.tracked_states:
-                with self.lock:
-                    self.tracked_states.clear()
-            return 0, 0
-
-        with self.lock:
-            current_ids = set(ids)
-
-            for person_id, centroid in zip(ids, centroids):
-                coord = coordinate_func(centroid)
-                current_side = self._get_side(coord, line_pos)
-
-                # Initialize state if first time seeing this ID
-                if person_id not in self.tracked_states:
-                    self.tracked_states[person_id] = {
-                        "last_side": current_side,
-                        "last_coord": coord,
-                    }
-                else:
-                    # FIXED: Check for crossing in EITHER direction
-                    state = self.tracked_states[person_id]
-                    last_side = state.get("last_side")
-                    last_coord = state.get("last_coord")
-
-                    if last_side != current_side:
-                        # Side changed! Check direction
-                        side_changed_from_left = last_side == "left" and current_side == "right"
-                        side_changed_from_right = last_side == "right" and current_side == "left"
-
-                        # Check if this matches IN direction
-                        if self.in_direction == "left_to_right" and side_changed_from_left:
-                            self.total_in += 1
-                            new_in += 1
-                            logger.debug("Person %d entered (left→right)", person_id)
-                        elif self.in_direction == "right_to_left" and side_changed_from_right:
-                            self.total_in += 1
-                            new_in += 1
-                            logger.debug("Person %d entered (right→left)", person_id)
-
-                        # Check if this matches OUT direction (FIXED: Allow exit even if entered before)
-                        if self.out_direction == "left_to_right" and side_changed_from_left:
-                            self.total_out += 1
-                            new_out += 1
-                            logger.debug("Person %d exited (left→right)", person_id)
-                        elif self.out_direction == "right_to_left" and side_changed_from_right:
-                            self.total_out += 1
-                            new_out += 1
-                            logger.debug("Person %d exited (right→left)", person_id)
-
-                    # Update state for next frame
-                    state["last_side"] = current_side
-                    state["last_coord"] = coord
-
-            # Remove truly lost IDs (not in current detections)
-            lost_ids = set(self.tracked_states.keys()) - current_ids
-            for lost_id in lost_ids:
-                del self.tracked_states[lost_id]
-
-            return new_in, new_out
-
-    def get_counts(self) -> Tuple[int, int]:
-        """Get thread-safe copy of counts (may be negative for ghost exits)."""
-        with self.lock:
-            return self.total_in, self.total_out
-
-    def reset(self) -> None:
-        """Reset all counters."""
-        with self.lock:
-            self.total_in = 0
-            self.total_out = 0
-            self.tracked_states.clear()
-
-
-class CameraProcessor:
-    """Processes a single camera with frame skipping and inference."""
-
-    def __init__(
-        self,
-        camera_config: dict,
+        camera_config: Dict[str, Any],
+        video_reader: ThreadedVideoReader,
+        state_manager: StateManager,
         model: VisionModel,
     ) -> None:
         """
-        Initialize camera processor.
+        Initialize the supervision tracker for a single camera.
 
         Args:
-            camera_config: Camera configuration dict
-            model: VisionModel instance (shared)
+            camera_config: Camera configuration dictionary from config.py.
+            video_reader: ThreadedVideoReader instance for this camera.
+            state_manager: StateManager instance for persisting counts.
+            model: VisionModel instance for detection.
         """
-        self.camera_id = camera_config["id"]
-        self.camera_url = camera_config["url"]
-        self.frame_skip = camera_config.get("frame_skip", config.FRAME_SKIP_DEFAULT)
-        self.enabled = camera_config.get("enabled", True)
+        self.camera_id: str = camera_config.get("id", "unknown")
+        self.camera_config: Dict[str, Any] = camera_config
+        self.video_reader: ThreadedVideoReader = video_reader
+        self.state_manager: StateManager = state_manager
+        self.model: VisionModel = model
 
-        self.model = model
-        self.reader = ThreadedVideoReader(self.camera_url, buffer_size=config.CAMERA_BUFFER_SIZE)
-        self.state_machine = CrossingStateMachine(
-            line_ratio=camera_config.get("line_ratio", 0.5),
-            orientation=camera_config.get("orientation", "vertical"),
-            in_direction=camera_config.get("in_direction", "left_to_right"),
+        self.orientation: str = camera_config.get("orientation", "vertical")
+        self.line_ratio: float = camera_config.get("line_ratio", 0.5)
+        self.in_direction: str = camera_config.get("in_direction", "left_to_right")
+        self.frame_skip: int = camera_config.get("frame_skip", 3)
+
+        self._running: bool = False
+        self._processing_thread: Optional[threading.Thread] = None
+        self._frame_count: int = 0
+        self._last_annotated_frame: Optional[np.ndarray] = None
+        self._frame_lock: threading.Lock = threading.Lock()
+
+        self._line_zone: Optional[sv.LineZone] = None
+        self._byte_tracker: Optional[sv.ByteTrack] = None
+        self._box_annotator: Optional[sv.BoxAnnotator] = None
+        self._label_annotator: Optional[sv.LabelAnnotator] = None
+        self._trace_annotator: Optional[sv.TraceAnnotator] = None
+        self._line_zone_annotator: Optional[sv.LineZoneAnnotator] = None
+
+        self._local_in_count: int = 0
+        self._local_out_count: int = 0
+        self._last_line_in: int = 0
+        self._last_line_out: int = 0
+
+        self._initialized: bool = False
+
+    def _initialize_supervision_components(self, frame_shape: Tuple[int, int]) -> None:
+        """
+        Initialize all supervision components based on frame dimensions.
+
+        Args:
+            frame_shape: Tuple of (height, width) of the frame.
+        """
+        frame_h, frame_w = frame_shape
+        logger.info(
+            "Camera '%s': Initializing supervision components for frame %dx%d",
+            self.camera_id,
+            frame_w,
+            frame_h
         )
 
-        self.frame_count = 0
-        self.stats = {
-            "total_in": 0,
-            "total_out": 0,
-            "last_detection_time": None,
-            "inference_count": 0,
-        }
+        line_start, line_end = self._calculate_line_coordinates(frame_w, frame_h)
+        logger.info(
+            "Camera '%s': Line coordinates: start=%s, end=%s",
+            self.camera_id,
+            line_start,
+            line_end
+        )
 
-    def start(self) -> bool:
-        """Start the video reader."""
-        return self.reader.start()
+        self._line_zone = sv.LineZone(
+            start=line_start,
+            end=line_end,
+            triggering_anchors=(sv.Position.CENTER,),
+        )
 
-    def stop(self) -> None:
-        """Stop the video reader."""
-        self.reader.stop()
+        self._byte_tracker = sv.ByteTrack(
+            track_activation_threshold=config.CONFIDENCE_THRESHOLD,
+            lost_track_buffer=90,
+            minimum_matching_threshold=config.IOU_THRESHOLD,
+            frame_rate=config.CAMERA_FPS,
+        )
 
-    def process_frame(self) -> bool:
+        self._box_annotator = sv.BoxAnnotator(
+            thickness=2,
+            color=ColorPalette.from_hex(['#00FF00', '#FF0000', '#0000FF', '#FFFF00']),
+        )
+
+        self._label_annotator = sv.LabelAnnotator(
+            text_thickness=1,
+            text_scale=0.5,
+            color=ColorPalette.from_hex(['#00FF00', '#FF0000', '#0000FF', '#FFFF00']),
+        )
+
+        self._trace_annotator = sv.TraceAnnotator(
+            thickness=2,
+            trace_length=20,
+            position=sv.Position.CENTER,
+            color=ColorPalette.from_hex(['#00FF00', '#FF0000', '#0000FF', '#FFFF00']),
+        )
+
+        self._line_zone_annotator = sv.LineZoneAnnotator(
+            thickness=3,
+            text_thickness=2,
+            text_scale=0.8,
+            color=Color.from_hex('#FFFFFF'),
+        )
+
+        self._initialized = True
+        logger.info(
+            "Camera '%s': Supervision components initialized successfully",
+            self.camera_id
+        )
+
+    def _calculate_line_coordinates(
+        self,
+        frame_w: int,
+        frame_h: int
+    ) -> Tuple[sv.Point, sv.Point]:
         """
-        Process one frame with frame skipping.
+        Calculate line start and end coordinates based on orientation and direction.
+
+        Args:
+            frame_w: Frame width in pixels.
+            frame_h: Frame height in pixels.
 
         Returns:
-            True if inference was run, False otherwise
+            Tuple of (start_point, end_point) as sv.Point objects.
         """
-        frame = self.reader.get_frame()
-        if frame is None:
-            return False
+        if self.orientation == "vertical":
+            x_pos = int(self.line_ratio * frame_w)
+            if self.in_direction in ["left_to_right", "right_to_left"]:
+                start = sv.Point(x=x_pos, y=0)
+                end = sv.Point(x=x_pos, y=frame_h)
+            else:
+                start = sv.Point(x=x_pos, y=0)
+                end = sv.Point(x=x_pos, y=frame_h)
+        else:
+            y_pos = int(self.line_ratio * frame_h)
+            if self.in_direction in ["top_to_bottom", "bottom_to_top"]:
+                start = sv.Point(x=0, y=y_pos)
+                end = sv.Point(x=frame_w, y=y_pos)
+            else:
+                start = sv.Point(x=0, y=y_pos)
+                end = sv.Point(x=frame_w, y=y_pos)
 
-        self.frame_count += 1
+        return start, end
 
-        should_infer = (self.frame_count % self.frame_skip) == 0
+    def _determine_in_out_direction(self) -> Tuple[str, str]:
+        """
+        Determine which LineZone count corresponds to IN and OUT.
 
-        if should_infer:
+        Returns:
+            Tuple of (in_attr, out_attr) indicating which line_zone attribute is IN/OUT.
+        """
+        if self.in_direction == "left_to_right":
+            return ("in_count", "out_count")
+        elif self.in_direction == "right_to_left":
+            return ("out_count", "in_count")
+        elif self.in_direction == "top_to_bottom":
+            return ("in_count", "out_count")
+        elif self.in_direction == "bottom_to_top":
+            return ("out_count", "in_count")
+        else:
+            return ("in_count", "out_count")
+
+    def start(self) -> None:
+        """Start the processing thread."""
+        if self._running:
+            logger.warning("Camera '%s': Tracker already running", self.camera_id)
+            return
+
+        self._running = True
+        self._processing_thread = threading.Thread(
+            target=self._processing_loop,
+            name=f"Tracker-{self.camera_id}",
+            daemon=True
+        )
+        self._processing_thread.start()
+        logger.info("Camera '%s': Supervision tracker started", self.camera_id)
+
+    def _processing_loop(self) -> None:
+        """Main processing loop for detection, tracking, and annotation."""
+        logger.info("Camera '%s': Processing loop started", self.camera_id)
+
+        while self._running:
             try:
-                detections = self.model.predict_with_tracking(frame)
+                frame = self.video_reader.get_frame()
+                
+                if frame is None:
+                    time.sleep(0.01)
+                    continue
 
-                frame_shape = detections.get('raw_frame_shape', frame.shape[:2])
-                new_in, new_out = self.state_machine.update(frame_shape, detections)
+                self._frame_count += 1
 
-                self.stats['total_in'], self.stats['total_out'] = self.state_machine.get_counts()
-                self.stats['last_detection_time'] = time.time()
-                self.stats['inference_count'] += 1
+                if self._frame_count % self.frame_skip != 0:
+                    continue
 
-                if config.ENABLE_DEBUG_DISPLAY:
-                    self._draw_debug(frame, detections, frame_shape)
+                if not self._initialized:
+                    frame_shape = (frame.shape[0], frame.shape[1])
+                    self._initialize_supervision_components(frame_shape)
 
-                return True
+                annotated_frame = self._process_frame(frame)
+
+                with self._frame_lock:
+                    self._last_annotated_frame = annotated_frame
 
             except Exception as e:
-                logger.error("Error processing frame from %s: %s", self.camera_id, str(e))
+                logger.error(
+                    "Camera '%s': Error in processing loop: %s",
+                    self.camera_id,
+                    str(e),
+                    exc_info=True
+                )
+                time.sleep(0.1)
 
-        return False
+        logger.info("Camera '%s': Processing loop ended", self.camera_id)
 
-    def _draw_debug(self, frame: np.ndarray, detections: dict, frame_shape: Tuple[int, int]) -> None:
-        """Draw debug visualization on frame."""
-        frame_h, frame_w = frame_shape
+    def _process_frame(self, frame: np.ndarray) -> np.ndarray:
+        """
+        Process a single frame: detect, track, count crossings, annotate.
 
-        if self.state_machine.orientation == "vertical":
-            line_x = int(self.state_machine.line_ratio * frame_w)
-            cv2.line(frame, (line_x, 0), (line_x, frame_h), (0, 255, 0), 2)
-        else:
-            line_y = int(self.state_machine.line_ratio * frame_h)
-            cv2.line(frame, (0, line_y), (frame_w, line_y), (0, 255, 0), 2)
+        Args:
+            frame: Input BGR frame.
 
-        centroids = detections.get('centroids', [])
-        boxes = detections.get('boxes', [])
-        ids = detections.get('ids', [])
+        Returns:
+            Annotated frame.
+        """
+        if not self._initialized or self._line_zone is None or self._byte_tracker is None:
+            logger.error("Camera '%s': Supervision components not initialized, skipping frame", self.camera_id)
+            return frame
 
-        for i, (bbox, centroid, person_id) in enumerate(zip(boxes, centroids, ids)):
-            x1, y1, x2, y2 = bbox
-            cx, cy = centroid
+        detection_result = self.model.predict_with_tracking(
+            frame,
+            conf=config.CONFIDENCE_THRESHOLD,
+            iou=config.IOU_THRESHOLD,
+        )
 
-            cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
-            cv2.circle(frame, (int(cx), int(cy)), 4, (0, 0, 255), -1)
-            cv2.putText(
-                frame,
-                f"ID:{person_id}",
-                (int(x1), int(y1) - 10),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (0, 255, 0),
-                2,
+        boxes = detection_result.get('boxes', [])
+        confs = detection_result.get('confs', [])
+        ids = detection_result.get('ids', [])
+
+        if len(boxes) > 0:
+            boxes_array = np.array(boxes) if not isinstance(boxes, np.ndarray) else boxes
+            confs_array = np.array(confs) if not isinstance(confs, np.ndarray) else confs
+
+            detections = sv.Detections(
+                xyxy=boxes_array,
+                confidence=confs_array,
+                class_id=np.zeros(len(boxes_array), dtype=int),
             )
+
+            if len(ids) > 0:
+                ids_array = np.array(ids) if not isinstance(ids, np.ndarray) else ids
+                detections.tracker_id = ids_array.astype(int)
+            else:
+                detections = self._byte_tracker.update_with_detections(detections)
+        else:
+            detections = sv.Detections.empty()
+
+        crossed_in, crossed_out = self._line_zone.trigger(detections=detections)
+
+        current_line_in = self._line_zone.in_count
+        current_line_out = self._line_zone.out_count
+
+        in_attr, out_attr = self._determine_in_out_direction()
+        
+        if in_attr == "in_count":
+            actual_in = current_line_in
+            actual_out = current_line_out
+        else:
+            actual_in = current_line_out
+            actual_out = current_line_in
+
+        new_in = actual_in - self._local_in_count
+        new_out = actual_out - self._local_out_count
+
+        if new_in > 0 or new_out > 0:
+            self.state_manager.bulk_update(new_in, new_out)
+            self._local_in_count = actual_in
+            self._local_out_count = actual_out
+            logger.info(
+                "Camera '%s': Line crossing - IN: +%d (total: %d), OUT: +%d (total: %d)",
+                self.camera_id,
+                new_in,
+                actual_in,
+                new_out,
+                actual_out
+            )
+
+        annotated_frame = frame.copy()
+
+        if len(detections) > 0 and self._trace_annotator is not None:
+            annotated_frame = self._trace_annotator.annotate(
+                scene=annotated_frame,
+                detections=detections
+            )
+
+        if len(detections) > 0 and self._box_annotator is not None:
+            annotated_frame = self._box_annotator.annotate(
+                scene=annotated_frame,
+                detections=detections
+            )
+
+        if len(detections) > 0 and self._label_annotator is not None:
+            if detections.tracker_id is not None:
+                labels = [f"ID:{tid}" for tid in detections.tracker_id]
+            else:
+                labels = [f"P{i}" for i in range(len(detections))]
+
+            annotated_frame = self._label_annotator.annotate(
+                scene=annotated_frame,
+                detections=detections,
+                labels=labels
+            )
+
+        if self._line_zone_annotator is not None:
+            annotated_frame = self._line_zone_annotator.annotate(
+                frame=annotated_frame,
+                line_counter=self._line_zone
+            )
+
+        global_stats = self.state_manager.get_stats()
+        self._draw_stats_overlay(
+            annotated_frame,
+            global_stats['total_in'],
+            global_stats['total_out'],
+            global_stats['current_inside']
+        )
+
+        return annotated_frame
+
+    def _draw_stats_overlay(
+        self,
+        frame: np.ndarray,
+        total_in: int,
+        total_out: int,
+        current_inside: int
+    ) -> None:
+        """
+        Draw statistics overlay on the frame.
+
+        Args:
+            frame: Frame to draw on (modified in place).
+            total_in: Total IN count.
+            total_out: Total OUT count.
+            current_inside: Current inside count.
+        """
+        overlay_height = 100
+        overlay = frame[:overlay_height, :].copy()
+        cv2.rectangle(frame, (0, 0), (frame.shape[1], overlay_height), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.3, frame[:overlay_height, :], 0.7, 0, frame[:overlay_height, :])
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.7
+        thickness = 2
 
         cv2.putText(
             frame,
-            f"{self.camera_id} | In:{self.stats['total_in']} Out:{self.stats['total_out']}",
-            (10, 30),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (0, 255, 0),
-            2,
+            f"Camera: {self.camera_id}",
+            (10, 25),
+            font,
+            font_scale,
+            (255, 255, 255),
+            thickness
         )
 
-        display_h = min(config.DEBUG_DISPLAY_WINDOW_HEIGHT, frame_h)
-        display_w = min(config.DEBUG_DISPLAY_WINDOW_WIDTH, frame_w)
-        display_frame = cv2.resize(frame, (display_w, display_h))
+        cv2.putText(
+            frame,
+            f"IN: {total_in}",
+            (10, 55),
+            font,
+            font_scale,
+            (0, 255, 0),
+            thickness
+        )
 
-        cv2.imshow(f"Debug: {self.camera_id}", display_frame)
-        cv2.waitKey(1)
+        cv2.putText(
+            frame,
+            f"OUT: {total_out}",
+            (150, 55),
+            font,
+            font_scale,
+            (0, 0, 255),
+            thickness
+        )
 
-    def get_stats(self) -> dict:
-        """Get camera statistics."""
-        return self.stats.copy()
+        display_inside = max(0, current_inside)
+        cv2.putText(
+            frame,
+            f"INSIDE: {display_inside}",
+            (10, 85),
+            font,
+            font_scale,
+            (255, 255, 0),
+            thickness
+        )
 
-    def is_connected(self) -> bool:
-        """Check if camera is connected."""
-        return self.reader.is_connected()
+        connection_status = "CONNECTED" if self.video_reader.is_connected() else "DISCONNECTED"
+        color = (0, 255, 0) if self.video_reader.is_connected() else (0, 0, 255)
+        cv2.putText(
+            frame,
+            connection_status,
+            (frame.shape[1] - 180, 25),
+            font,
+            font_scale,
+            color,
+            thickness
+        )
+
+    def get_annotated_frame(self) -> Optional[np.ndarray]:
+        """
+        Get the latest annotated frame.
+
+        Returns:
+            Copy of latest annotated frame or None.
+        """
+        with self._frame_lock:
+            if self._last_annotated_frame is not None:
+                return self._last_annotated_frame.copy()
+            return None
+
+    def get_local_stats(self) -> Dict[str, Any]:
+        """
+        Get local statistics for this camera.
+
+        Returns:
+            Dictionary with local IN/OUT counts.
+        """
+        return {
+            'camera_id': self.camera_id,
+            'local_in': self._local_in_count,
+            'local_out': self._local_out_count,
+            'connected': self.video_reader.is_connected(),
+            'reconnect_count': self.video_reader.get_reconnect_count(),
+        }
+
+    def stop(self) -> None:
+        """Stop the processing thread."""
+        logger.info("Camera '%s': Stopping supervision tracker", self.camera_id)
+        self._running = False
+
+        if self._processing_thread is not None:
+            self._processing_thread.join(timeout=5.0)
+            if self._processing_thread.is_alive():
+                logger.warning(
+                    "Camera '%s': Processing thread did not terminate within timeout",
+                    self.camera_id
+                )
+
+        logger.info("Camera '%s': Supervision tracker stopped", self.camera_id)
 
 
 class CameraManager:
     """
-    Manages multiple camera processors with coordinated inference scheduling.
-    Prevents CPU overload by limiting concurrent inference.
+    Manager for multiple cameras with supervision trackers.
+    Orchestrates all video readers and trackers, provides aggregated statistics.
     """
 
-    def __init__(self, model: VisionModel) -> None:
-        """Initialize camera manager."""
-        self.model = model
-        self.processors: Dict[str, CameraProcessor] = {}
-        self.running = False
-        self.manager_thread: Optional[threading.Thread] = None
-        self.total_in = 0
-        self.total_out = 0
-        self.lock = threading.RLock()
+    def __init__(
+        self,
+        model: VisionModel,
+        state_manager: StateManager
+    ) -> None:
+        """
+        Initialize the camera manager.
 
-    def add_camera(self, camera_config: dict) -> bool:
-        """Add a camera to be managed."""
-        try:
-            processor = CameraProcessor(camera_config, self.model)
-            self.processors[camera_config["id"]] = processor
-            logger.info("Camera %s added to manager", camera_config["id"])
-            return True
-        except Exception as e:
-            logger.error("Failed to add camera: %s", str(e))
+        Args:
+            model: Shared VisionModel instance for all cameras.
+            state_manager: Shared StateManager instance for persisting counts.
+        """
+        self.model: VisionModel = model
+        self.state_manager: StateManager = state_manager
+        self._video_readers: Dict[str, ThreadedVideoReader] = {}
+        self._trackers: Dict[str, SupervisionTracker] = {}
+        self._running: bool = False
+        self._display_thread: Optional[threading.Thread] = None
+        self._lock: threading.Lock = threading.Lock()
+
+        logger.info("CameraManager initialized")
+
+    def add_camera(self, camera_config: Dict[str, Any]) -> bool:
+        """
+        Add a camera to the manager.
+
+        Args:
+            camera_config: Camera configuration dictionary.
+
+        Returns:
+            True if camera added successfully, False otherwise.
+        """
+        camera_id = camera_config.get("id", f"camera_{len(self._video_readers)}")
+        camera_url = camera_config.get("url", "")
+
+        if not camera_url:
+            logger.error("Camera '%s': No URL provided", camera_id)
             return False
 
+        if camera_id in self._video_readers:
+            logger.warning("Camera '%s': Already exists, skipping", camera_id)
+            return False
+
+        with self._lock:
+            video_reader = ThreadedVideoReader(
+                camera_id=camera_id,
+                camera_url=camera_url,
+                buffer_size=config.CAMERA_BUFFER_SIZE
+            )
+            self._video_readers[camera_id] = video_reader
+
+            tracker = SupervisionTracker(
+                camera_config=camera_config,
+                video_reader=video_reader,
+                state_manager=self.state_manager,
+                model=self.model,
+            )
+            self._trackers[camera_id] = tracker
+
+        logger.info("Camera '%s' added to manager", camera_id)
+        return True
+
     def start(self) -> None:
-        """Start all cameras and the processing loop."""
-        self.running = True
+        """Start all video readers and trackers."""
+        if self._running:
+            logger.warning("CameraManager already running")
+            return
 
-        for camera_id, processor in self.processors.items():
-            if processor.enabled:
-                if processor.start():
-                    logger.info("Camera %s started", camera_id)
-                else:
-                    logger.warning("Failed to start camera %s", camera_id)
+        self._running = True
 
-        self.manager_thread = threading.Thread(target=self._process_loop, daemon=False)
-        self.manager_thread.start()
-        logger.info("Camera manager started with %d cameras", len(self.processors))
+        with self._lock:
+            for camera_id, video_reader in self._video_readers.items():
+                logger.info("Starting video reader for camera '%s'", camera_id)
+                video_reader.start()
 
-    def _process_loop(self) -> None:
-        """Main processing loop for all cameras."""
-        health_check_timer = 0
+            for camera_id, tracker in self._trackers.items():
+                logger.info("Starting tracker for camera '%s'", camera_id)
+                tracker.start()
 
-        while self.running:
+        if config.ENABLE_DEBUG_DISPLAY:
+            self._display_thread = threading.Thread(
+                target=self._display_loop,
+                name="DisplayLoop",
+                daemon=True
+            )
+            self._display_thread.start()
+            logger.info("Debug display loop started")
+
+        logger.info("CameraManager started with %d cameras", len(self._video_readers))
+
+    def _display_loop(self) -> None:
+        """Display loop for showing annotated frames in debug mode."""
+        logger.info("Display loop started")
+
+        while self._running:
             try:
-                for camera_id, processor in self.processors.items():
-                    if processor.enabled:
-                        processor.process_frame()
+                with self._lock:
+                    for camera_id, tracker in self._trackers.items():
+                        frame = tracker.get_annotated_frame()
+                        if frame is not None:
+                            display_frame = cv2.resize(
+                                frame,
+                                (config.DEBUG_DISPLAY_WINDOW_WIDTH, config.DEBUG_DISPLAY_WINDOW_HEIGHT)
+                            )
+                            window_name = f"Camera: {camera_id}"
+                            cv2.imshow(window_name, display_frame)
 
-                with self.lock:
-                    total_in = sum(p.stats['total_in'] for p in self.processors.values())
-                    total_out = sum(p.stats['total_out'] for p in self.processors.values())
-                    self.total_in = total_in
-                    self.total_out = total_out
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    logger.info("Display loop: 'q' pressed, stopping")
+                    break
 
-                health_check_timer += 1
-                if health_check_timer >= config.HEALTH_CHECK_INTERVAL * 10:
-                    self._health_check()
-                    health_check_timer = 0
-
-                time.sleep(0.01)
+                time.sleep(0.03)
 
             except Exception as e:
-                logger.error("Error in process loop: %s", str(e))
+                logger.error("Error in display loop: %s", str(e))
+                time.sleep(0.1)
 
-    def _health_check(self) -> None:
-        """Periodically check camera connections."""
-        for camera_id, processor in self.processors.items():
-            if not processor.is_connected():
-                logger.warning("Camera %s disconnected. Attempting reconnect...", camera_id)
-                processor.stop()
-                if not processor.start():
-                    logger.error("Failed to reconnect camera %s", camera_id)
+        cv2.destroyAllWindows()
+        logger.info("Display loop ended")
+
+    def get_aggregated_stats(self) -> Dict[str, Any]:
+        """
+        Get aggregated statistics from all cameras.
+
+        Returns:
+            Dictionary with global and per-camera statistics.
+        """
+        global_stats = self.state_manager.get_stats()
+        
+        camera_stats = []
+        connected_count = 0
+
+        with self._lock:
+            for camera_id, tracker in self._trackers.items():
+                local_stats = tracker.get_local_stats()
+                camera_stats.append(local_stats)
+                if local_stats.get('connected', False):
+                    connected_count += 1
+
+        return {
+            'total_in': global_stats['total_in'],
+            'total_out': global_stats['total_out'],
+            'current_inside': global_stats['current_inside'],
+            'camera_count': len(self._trackers),
+            'connected_count': connected_count,
+            'cameras': camera_stats,
+        }
+
+    def get_camera_stats(self, camera_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get statistics for a specific camera.
+
+        Args:
+            camera_id: Camera identifier.
+
+        Returns:
+            Dictionary with camera statistics or None if not found.
+        """
+        with self._lock:
+            tracker = self._trackers.get(camera_id)
+            if tracker:
+                return tracker.get_local_stats()
+            return None
 
     def stop(self) -> None:
-        """Stop all processors."""
-        logger.info("Stopping camera manager...")
-        self.running = False
+        """Stop all video readers and trackers."""
+        logger.info("Stopping CameraManager")
+        self._running = False
 
-        if self.manager_thread is not None:
-            self.manager_thread.join(timeout=5)
+        with self._lock:
+            for camera_id, tracker in self._trackers.items():
+                logger.info("Stopping tracker for camera '%s'", camera_id)
+                tracker.stop()
 
-        for processor in self.processors.values():
-            processor.stop()
+            for camera_id, video_reader in self._video_readers.items():
+                logger.info("Stopping video reader for camera '%s'", camera_id)
+                video_reader.stop()
 
-        logger.info("Camera manager stopped")
+        if self._display_thread is not None:
+            self._display_thread.join(timeout=3.0)
 
-    def get_aggregated_stats(self) -> dict:
-        """Get aggregated statistics from all cameras."""
-        with self.lock:
-            stats = {
-                "total_in": self.total_in,
-                "total_out": self.total_out,
-                "current_inside": self.total_in - self.total_out,
-                "camera_count": len(self.processors),
-                "connected_count": sum(1 for p in self.processors.values() if p.is_connected()),
-                "cameras": {},
-            }
-
-            for camera_id, processor in self.processors.items():
-                stats["cameras"][camera_id] = processor.get_stats()
-
-            return stats
-
-    def get_camera_stats(self, camera_id: str) -> Optional[dict]:
-        """Get statistics for a specific camera."""
-        if camera_id in self.processors:
-            return self.processors[camera_id].get_stats()
-        return None
+        cv2.destroyAllWindows()
+        logger.info("CameraManager stopped")
