@@ -132,6 +132,7 @@ dmypy.json
 *.md
 
 !README.md
+*.json
 
 # YOLOv8 / OpenCV
 *.pt
