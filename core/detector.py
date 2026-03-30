@@ -132,10 +132,9 @@ class VisionModel:
             frame_h, frame_w = frame.shape[:2]
             resized_frame, (scale_x, scale_y) = self._resize_frame_for_inference(frame)
 
-            # FIXED: Enhanced tracker configuration
-            # - track_buffer: Increase buffer to survive IP camera lag/occlusions
-            # - max_age: Frames to keep track after detection lost (60 for ~2 sec at 30 FPS)
-            # - min_hits: Frames to confirm a track before assignment (reduces noise)
+            # FIXED: Enhanced tracker configuration via tracker config file
+            # Note: max_age, track_buffer, min_hits must be configured via tracker YAML file,
+            # not via kwargs to model.track()
             results = self.model.track(
                 resized_frame,
                 conf=conf,
@@ -143,10 +142,6 @@ class VisionModel:
                 persist=True,
                 verbose=False,
                 tracker="bytetrack.yaml",
-                # Enhanced tracker args for multi-camera Wi-Fi scenarios
-                track_buffer=30,  # Increased from default (survives 1 sec occlusion at 30 FPS)
-                max_age=60,       # Keep IDs for 2 seconds even if not detected
-                min_hits=3,       # Require 3 frames to confirm new track (noise reduction)
             )
 
             detection_dict = {

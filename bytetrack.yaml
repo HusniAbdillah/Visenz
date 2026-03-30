@@ -1,0 +1,12 @@
+# ByteTrack configuration for edge-vision-counter
+# Enhanced for Wi-Fi IP camera scenarios with lag tolerance
+
+tracker_type: bytetrack
+track_high_thresh: 0.25       # First-stage match threshold
+track_low_thresh: 0.1         # Second-stage threshold for low-score matches
+new_track_thresh: 0.25        # Start new track threshold
+track_buffer: 90              # Buffer for unmatched tracks (3 sec occlusion at 30 FPS)
+match_thresh: 0.8             # Matching threshold for second association
+max_age: 90                    # Maximum age for unmatched track (3 seconds at 30 FPS)
+min_hits: 3                    # Minimum consecutive positive matches for a new track
+fuse_score: True
