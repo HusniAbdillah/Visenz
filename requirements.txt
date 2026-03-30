@@ -1,0 +1,9 @@
+ultralytics>=8.0.0
+opencv-python>=4.8.0
+opencv-contrib-python>=4.8.0
+openvino>=2023.0.0
+openvino-dev>=2023.0.0
+flask>=2.3.0
+numpy>=1.24.0
+torch>=2.0.0
+torchvision>=0.15.0
