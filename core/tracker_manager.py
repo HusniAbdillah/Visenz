@@ -592,12 +592,8 @@ class CameraManager:
                     for camera_id, tracker in self._trackers.items():
                         frame = tracker.get_annotated_frame()
                         if frame is not None:
-                            display_frame = cv2.resize(
-                                frame,
-                                (config.DEBUG_DISPLAY_WINDOW_WIDTH, config.DEBUG_DISPLAY_WINDOW_HEIGHT)
-                            )
                             window_name = f"Camera: {camera_id}"
-                            cv2.imshow(window_name, display_frame)
+                            cv2.imshow(window_name, frame)
 
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('q'):
