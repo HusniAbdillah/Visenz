@@ -21,6 +21,24 @@ CAMERAS = [
         "frame_skip": 3,  # Process every Nth frame for inference (1=every frame, 3=every 3rd)
         "enabled": True,
     },
+    {
+        "id": "Cam_Pintu_Belakang",
+        "url": "http://192.168.1.38:4747/video",
+        "orientation": "vertical",  # 'vertical' or 'horizontal'
+        "line_ratio": 0.5,  # 0.0 to 1.0 (50% of width for vertical, 50% of height for horizontal)
+        "in_direction": "left_to_right",  # Options: 'left_to_right', 'right_to_left', 'top_to_bottom', 'bottom_to_top'
+        "frame_skip": 3,  # Process every Nth frame for inference (1=every frame, 3=every 3rd)
+        "enabled": True,
+    },
+    {
+        "id": "Cam_Pintu_Samping",
+        "url": "0",
+        "orientation": "vertical",  # 'vertical' or 'horizontal'
+        "line_ratio": 0.5,  # 0.0 to 1.0 (50% of width for vertical, 50% of height for horizontal)
+        "in_direction": "right_to_left",  # Options: 'left_to_right', 'right_to_left', 'top_to_bottom', 'bottom_to_top'
+        "frame_skip": 3,  # Process every Nth frame for inference (1=every frame, 3=every 3rd)
+        "enabled": True,
+    },
     # Add more cameras here with the same structure:
     # {
     #     "id": "Cam_Ruang_Belakang",

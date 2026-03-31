@@ -17,6 +17,24 @@ import config
 logger = logging.getLogger(__name__)
 
 
+def parse_source(url: str):
+    """
+    Parse camera source URL to handle both webcam indices and IP camera URLs.
+    
+    Args:
+        url: Camera source URL (string digit for webcam like "0", "1" or URL for IP camera)
+    
+    Returns:
+        Integer for webcam index, or string URL for IP/RTSP cameras
+    """
+    if isinstance(url, str):
+        if url.isdigit():
+            return int(url)
+        if url.startswith(("http", "rtsp", "https")):
+            return url
+    return url
+
+
 class ThreadedVideoReader:
     """
     Auto-healing threaded video capture for Wi-Fi/IP cameras.
@@ -105,7 +123,7 @@ class ThreadedVideoReader:
                 self.camera_url
             )
 
-            self._cap = cv2.VideoCapture(self.camera_url)
+            self._cap = cv2.VideoCapture(parse_source(self.camera_url))
 
             if not self._cap.isOpened():
                 logger.warning(
