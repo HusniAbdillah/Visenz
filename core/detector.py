@@ -5,14 +5,22 @@ Handles model loading and person detection optimized for multi-camera inference.
 """
 
 import logging
+import os
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Any
 import cv2
 import numpy as np
 import torch
 from ultralytics import YOLO
 
 import config
+
+# Clear invalid CUDA_VISIBLE_DEVICES before torch/ultralytics initialization
+_cuda_visible = os.environ.get('CUDA_VISIBLE_DEVICES', '').strip()
+if _cuda_visible and not all(c.isdigit() or c in ',-' for c in _cuda_visible):
+    logger_early = logging.getLogger(__name__)
+    logger_early.info(f"Clearing invalid CUDA_VISIBLE_DEVICES='{_cuda_visible}'")
+    os.environ.pop('CUDA_VISIBLE_DEVICES', None)
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +38,7 @@ class VisionModel:
         """Initialize the vision model with hardware acceleration detection."""
         self.model: Optional[YOLO] = None
         self.device: str = "cpu"
+        self.openvino_runtime_device: str = "CPU"
         self.inference_size = config.CAMERA_INFERENCE_SIZE
         self._initialize_model()
 
@@ -55,7 +64,7 @@ class VisionModel:
                 return
 
             # PRIORITY 3: Intel iGPU / CPU Optimization (OpenVINO)
-            if self._try_openvino():
+            if config.USE_OPENVINO and self._try_openvino():
                 return
 
             # PRIORITY 4: Standard CPU Fallback
@@ -139,7 +148,11 @@ class VisionModel:
             ov_model_path = str(openvino_dir)
             self.model = YOLO(ov_model_path)
             self.device = "openvino"
-            logger.info("Model successfully loaded with OpenVINO backend (device: openvino)")
+            self.openvino_runtime_device = str(getattr(config, "OPENVINO_DEVICE", "GPU")).upper()
+            logger.info(
+                "Model successfully loaded with OpenVINO backend (runtime device: %s)",
+                self.openvino_runtime_device,
+            )
             return True
 
         except ImportError as e:
@@ -152,7 +165,7 @@ class VisionModel:
     def _export_to_openvino(self) -> None:
         """
         Export the YOLOv8n model to OpenVINO format.
-        Uses GPU device if available, otherwise CPU.
+        Export is always done on CPU/default path to avoid CUDA device parsing.
 
         Raises:
             RuntimeError: If export fails.
@@ -162,17 +175,8 @@ class VisionModel:
             model_path = f"{config.MODEL_NAME}.pt"
             base_model = YOLO(model_path)
 
-            # Determine export device based on OpenVINO config
-            openvino_device = getattr(config, 'OPENVINO_DEVICE', 'GPU')
-
-            logger.info("Exporting YOLOv8n to OpenVINO format with device: %s", openvino_device)
-
-            export_kwargs = {
-                "format": "openvino",
-                "device": openvino_device,
-            }
-
-            export_path = base_model.export(**export_kwargs)
+            logger.info("Exporting YOLOv8n to OpenVINO format using default export device")
+            export_path = base_model.export(format="openvino")
             logger.info("OpenVINO export completed successfully: %s", export_path)
 
         except Exception as e:
@@ -237,6 +241,8 @@ class VisionModel:
             # FIXED: Enhanced tracker configuration via tracker config file
             # Note: max_age, track_buffer, min_hits must be configured via tracker YAML file,
             # not via kwargs to model.track()
+            # For OpenVINO models, pass 'cpu' device (OpenVINO runtime device handled separately)
+            track_device = "cpu" if self.device == "openvino" else self.device
             results = self.model.track(
                 resized_frame,
                 conf=conf,
@@ -244,6 +250,7 @@ class VisionModel:
                 persist=True,
                 verbose=False,
                 tracker="bytetrack.yaml",
+                device=track_device,
             )
 
             detection_dict = {
@@ -261,8 +268,8 @@ class VisionModel:
                     boxes = result.boxes
 
                     try:
-                        class_ids = boxes.cls.cpu().numpy().astype(int)
-                    except:
+                        class_ids = _as_numpy(boxes.cls).astype(int, copy=False)
+                    except Exception:
                         class_ids = np.zeros(len(boxes), dtype=int)
 
                     # Filter to person class only (COCO class 0)
@@ -270,16 +277,16 @@ class VisionModel:
 
                     if np.any(person_mask):
                         # Get detections in resized space
-                        xyxy_resized = boxes.xyxy[person_mask].cpu().numpy()
+                        xyxy_resized = _to_numpy(boxes.xyxy[person_mask])
 
                         # Scale back to original frame coordinates
-                        xyxy_original = xyxy_resized * np.array([scale_x, scale_y, scale_x, scale_y])
+                        xyxy_original = xyxy_resized * np.array([scale_x, scale_y, scale_x, scale_y], dtype=float)
 
                         detection_dict['boxes'] = xyxy_original
-                        detection_dict['confs'] = boxes.conf[person_mask].cpu().numpy()
+                        detection_dict['confs'] = _to_numpy(boxes.conf[person_mask])
 
                         if boxes.id is not None:
-                            detection_dict['ids'] = boxes.id[person_mask].cpu().numpy().astype(int)
+                            detection_dict['ids'] = _to_numpy(boxes.id[person_mask]).astype(int, copy=False)
                         else:
                             detection_dict['ids'] = np.arange(len(xyxy_original), dtype=int)
 
@@ -296,3 +303,24 @@ class VisionModel:
     def get_device(self) -> str:
         """Return the device being used for inference."""
         return self.device
+
+
+def _to_numpy(x: Any) -> np.ndarray:
+    """Convert torch tensor / ultralytics tensor-like / ndarray to ndarray."""
+    if x is None:
+        return np.array([])
+    if hasattr(x, "cpu"):   # torch-like
+        x = x.cpu()
+    if hasattr(x, "numpy"): # torch tensor on CPU
+        return x.numpy()
+    return np.asarray(x)
+
+
+def _as_numpy(x: Any) -> np.ndarray:
+    if x is None:
+        return np.array([])
+    if hasattr(x, "cpu"):   # torch tensor
+        x = x.cpu()
+    if hasattr(x, "numpy"): # torch tensor on CPU
+        return x.numpy()
+    return np.asarray(x)
