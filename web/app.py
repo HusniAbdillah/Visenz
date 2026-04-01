@@ -80,6 +80,12 @@ def stream():
 
             while True:
                 try:
+                    if state_manager is None:
+                        logger.error("StateManager instance is None in event generator")
+                        yield f"data: {json.dumps({'error': 'state_manager not initialized'})}\n\n"
+                        time.sleep(1)
+                        continue
+
                     stats = state_manager.get_stats()
 
                     camera_count = 0

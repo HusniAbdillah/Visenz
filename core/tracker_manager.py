@@ -311,7 +311,8 @@ class SupervisionTracker:
         new_out = actual_out - self._local_out_count
 
         if new_in > 0 or new_out > 0:
-            self.state_manager.bulk_update(new_in, new_out)
+            if self.state_manager is not None:
+                self.state_manager.bulk_update(new_in, new_out)
             self._local_in_count = actual_in
             self._local_out_count = actual_out
             logger.info(
@@ -355,13 +356,14 @@ class SupervisionTracker:
                 line_counter=self._line_zone
             )
 
-        global_stats = self.state_manager.get_stats()
-        self._draw_stats_overlay(
-            annotated_frame,
-            global_stats['total_in'],
-            global_stats['total_out'],
-            global_stats['current_inside']
-        )
+        if self.state_manager is not None:
+            global_stats = self.state_manager.get_stats()
+            self._draw_stats_overlay(
+                annotated_frame,
+                global_stats['total_in'],
+                global_stats['total_out'],
+                global_stats['current_inside']
+            )
 
         return annotated_frame
 
@@ -616,7 +618,15 @@ class CameraManager:
         Returns:
             Dictionary with global and per-camera statistics.
         """
-        global_stats = self.state_manager.get_stats()
+        if self.state_manager is None:
+            logger.warning("StateManager not available for aggregated stats")
+            global_stats = {
+                'total_in': 0,
+                'total_out': 0,
+                'current_inside': 0
+            }
+        else:
+            global_stats = self.state_manager.get_stats()
         
         camera_stats = []
         connected_count = 0
