@@ -80,6 +80,47 @@ class SupervisionTracker:
 
         self._initialized: bool = False
 
+    def _normalize_frame(self, frame: np.ndarray) -> np.ndarray:
+        """
+        Normalize frame size based on configuration.
+
+        Modes:
+        - none: return original frame
+        - letterbox: keep aspect ratio + pad (no crop, no distortion)
+        - stretch: direct resize to target (no crop, possible distortion)
+        """
+        mode = str(getattr(config, "FRAME_NORMALIZATION_MODE", "none")).lower()
+        target_w = int(getattr(config, "FRAME_NORMALIZATION_WIDTH", frame.shape[1]))
+        target_h = int(getattr(config, "FRAME_NORMALIZATION_HEIGHT", frame.shape[0]))
+
+        if mode == "none":
+            return frame
+
+        if target_w <= 0 or target_h <= 0:
+            return frame
+
+        if mode == "stretch":
+            return cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+
+        if mode == "letterbox":
+            src_h, src_w = frame.shape[:2]
+            if src_w <= 0 or src_h <= 0:
+                return frame
+
+            scale = min(target_w / src_w, target_h / src_h)
+            new_w = max(1, int(round(src_w * scale)))
+            new_h = max(1, int(round(src_h * scale)))
+
+            resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            canvas = np.zeros((target_h, target_w, 3), dtype=frame.dtype)
+
+            x0 = (target_w - new_w) // 2
+            y0 = (target_h - new_h) // 2
+            canvas[y0:y0 + new_h, x0:x0 + new_w] = resized
+            return canvas
+
+        return frame
+
     def _initialize_supervision_components(self, frame_shape: Tuple[int, int]) -> None:
         """
         Initialize all supervision components based on frame dimensions.
@@ -225,6 +266,8 @@ class SupervisionTracker:
                 if frame is None:
                     time.sleep(0.01)
                     continue
+
+                frame = self._normalize_frame(frame)
 
                 self._frame_count += 1
 

@@ -60,6 +60,14 @@ CAMERA_BUFFER_SIZE = 1  # OpenCV buffer size (1 = no buffering, prevents Wi-Fi l
 CAMERA_CONNECT_TIMEOUT = 10  # Seconds to wait for camera connection
 CAMERA_READ_TIMEOUT = 5.0  # Seconds to wait per frame read
 
+# Frame normalization before tracking/inference.
+# - "none": use raw camera frame as-is (native/default behavior)
+# - "letterbox": resize while keeping aspect ratio, then pad (no crop, no distortion)
+# - "stretch": force resize to target size (no crop, but may distort)
+FRAME_NORMALIZATION_MODE = "letterbox"
+FRAME_NORMALIZATION_WIDTH = 640
+FRAME_NORMALIZATION_HEIGHT = 480
+
 # Model Configuration
 MODEL_NAME = "yolov8n"  # Nano model for edge devices
 MODEL_TRACK_CLASS = 0  # 0 = person class in COCO dataset
