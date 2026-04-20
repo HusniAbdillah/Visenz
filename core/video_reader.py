@@ -123,7 +123,12 @@ class ThreadedVideoReader:
                 self.camera_url
             )
 
-            self._cap = cv2.VideoCapture(parse_source(self.camera_url))
+            source = parse_source(self.camera_url)
+            
+            if isinstance(source, int):
+                self._cap = cv2.VideoCapture(source, cv2.CAP_DSHOW)
+            else:
+                self._cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
 
             if not self._cap.isOpened():
                 logger.warning(
@@ -134,6 +139,7 @@ class ThreadedVideoReader:
                 self._connected = False
                 return False
 
+            # Optimization settings
             self._cap.set(cv2.CAP_PROP_BUFFERSIZE, self._buffer_size)
             self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.CAMERA_FRAME_WIDTH)
             self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.CAMERA_FRAME_HEIGHT)
@@ -144,8 +150,9 @@ class ThreadedVideoReader:
 
             self._connected = True
             logger.info(
-                "Camera '%s' connected. Resolution: %dx%d",
+                "Camera '%s' connected via %s. Resolution: %dx%d",
                 self.camera_id,
+                "DirectShow" if isinstance(source, int) else "FFMPEG",
                 self._frame_width,
                 self._frame_height
             )
