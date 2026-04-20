@@ -60,6 +60,12 @@ CAMERA_BUFFER_SIZE = 1  # OpenCV buffer size (1 = no buffering, prevents Wi-Fi l
 CAMERA_CONNECT_TIMEOUT = 10  # Seconds to wait for camera connection
 CAMERA_READ_TIMEOUT = 5.0  # Seconds to wait per frame read
 
+# Uniform capture profile for all cameras.
+# Keep enabled so every camera uses the same requested profile.
+CAMERA_ENFORCE_UNIFORM_CAPTURE = True
+CAMERA_PREFERRED_FOURCC = "MJPG"  # Common webcam format to reduce backend mismatch
+CAMERA_DISABLE_AUTO_ZOOM = True
+
 # Frame normalization before tracking/inference.
 # - "none": use raw camera frame as-is (native/default behavior)
 # - "letterbox": resize while keeping aspect ratio, then pad (no crop, no distortion)

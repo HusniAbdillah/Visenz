@@ -141,8 +141,29 @@ class ThreadedVideoReader:
 
             # Optimization settings
             self._cap.set(cv2.CAP_PROP_BUFFERSIZE, self._buffer_size)
-            self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.CAMERA_FRAME_WIDTH)
-            self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.CAMERA_FRAME_HEIGHT)
+
+            if getattr(config, "CAMERA_ENFORCE_UNIFORM_CAPTURE", True):
+                fourcc_code = str(getattr(config, "CAMERA_PREFERRED_FOURCC", "")).strip().upper()
+                if len(fourcc_code) == 4:
+                    try:
+                        fourcc_fn = getattr(cv2, "VideoWriter_fourcc", None)
+                        if fourcc_fn is None:
+                            fourcc_fn = cv2.VideoWriter.fourcc
+                        self._cap.set(cv2.CAP_PROP_FOURCC, fourcc_fn(*fourcc_code))
+                    except Exception:
+                        pass
+
+                self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.CAMERA_FRAME_WIDTH)
+                self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.CAMERA_FRAME_HEIGHT)
+
+                if getattr(config, "CAMERA_DISABLE_AUTO_ZOOM", False):
+                    # Some webcam drivers support CAP_PROP_ZOOM and can keep stale zoom values.
+                    # Setting zoom to 0 requests widest/default FOV to avoid digital crop look.
+                    try:
+                        self._cap.set(cv2.CAP_PROP_ZOOM, 0)
+                    except Exception:
+                        pass
+
             self._cap.set(cv2.CAP_PROP_FPS, config.CAMERA_FPS)
 
             self._frame_width = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -156,6 +177,21 @@ class ThreadedVideoReader:
                 self._frame_width,
                 self._frame_height
             )
+
+            if getattr(config, "CAMERA_ENFORCE_UNIFORM_CAPTURE", True):
+                if (
+                    self._frame_width != int(config.CAMERA_FRAME_WIDTH)
+                    or self._frame_height != int(config.CAMERA_FRAME_HEIGHT)
+                ):
+                    logger.warning(
+                        "Camera '%s': requested %dx%d but driver returned %dx%d. "
+                        "Will continue with software letterbox normalization.",
+                        self.camera_id,
+                        int(config.CAMERA_FRAME_WIDTH),
+                        int(config.CAMERA_FRAME_HEIGHT),
+                        self._frame_width,
+                        self._frame_height,
+                    )
             return True
 
         except Exception as e:
