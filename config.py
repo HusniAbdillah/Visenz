@@ -14,7 +14,7 @@ PROJECT_ROOT = Path(__file__).parent
 CAMERAS = [
     {
         "id": "Cam_Pintu_Utama",
-        "url": "6",
+        "url": "5",
         "orientation": "vertical",  # 'vertical' or 'horizontal'
         "line_ratio": 0.5,  # 0.0 to 1.0 (50% of width for vertical, 50% of height for horizontal)
         "in_direction": "left_to_right",  # Options: 'left_to_right', 'right_to_left', 'top_to_bottom', 'bottom_to_top'
@@ -23,10 +23,10 @@ CAMERAS = [
     },
     {
         "id": "Cam_Pintu_Belakang",
-        "url": "5",
-        "orientation": "horizontal",  # 'vertical' or 'horizontal'
+        "url": "6",
+        "orientation": "vertical",  # 'vertical' or 'horizontal'
         "line_ratio": 0.5,  # 0.0 to 1.0 (50% of width for vertical, 50% of height for horizontal)
-        "in_direction": "left_to_right",  # Options: 'left_to_right', 'right_to_left', 'top_to_bottom', 'bottom_to_top'
+        "in_direction": "right_to_left",  # Options: 'left_to_right', 'right_to_left', 'top_to_bottom', 'bottom_to_top'
         "frame_skip": 3,  # Process every Nth frame for inference (1=every frame, 3=every 3rd)
         "enabled": False,
     },
@@ -53,8 +53,8 @@ CAMERAS = [
 
 # Video Capture Configuration
 CAMERA_FPS = 15
-CAMERA_FRAME_WIDTH = 640
-CAMERA_FRAME_HEIGHT = 480
+CAMERA_FRAME_WIDTH = 1280
+CAMERA_FRAME_HEIGHT = 720
 CAMERA_INFERENCE_SIZE = 640  # Max resolution for inference (YOLOv8n optimal)
 CAMERA_BUFFER_SIZE = 1  # OpenCV buffer size (1 = no buffering, prevents Wi-Fi lag)
 CAMERA_CONNECT_TIMEOUT = 10  # Seconds to wait for camera connection
