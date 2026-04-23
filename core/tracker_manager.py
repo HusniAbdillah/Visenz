@@ -355,7 +355,18 @@ class SupervisionTracker:
 
         if new_in > 0 or new_out > 0:
             if self.state_manager is not None:
-                self.state_manager.bulk_update(new_in, new_out)
+                if new_in > 0:
+                    self.state_manager.record_crossing(
+                        camera_id=self.camera_id,
+                        direction="IN",
+                        count=new_in,
+                    )
+                if new_out > 0:
+                    self.state_manager.record_crossing(
+                        camera_id=self.camera_id,
+                        direction="OUT",
+                        count=new_out,
+                    )
             self._local_in_count = actual_in
             self._local_out_count = actual_out
             logger.info(

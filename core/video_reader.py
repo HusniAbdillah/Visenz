@@ -5,6 +5,7 @@ Strictly handles pulling frames via cv2.VideoCapture with auto-reconnect.
 """
 
 import logging
+import os
 import threading
 import time
 from typing import Optional
@@ -35,6 +36,10 @@ def parse_source(url: str):
     return url
 
 
+def _is_rtsp_source(source: str) -> bool:
+    return isinstance(source, str) and source.startswith("rtsp")
+
+
 class ThreadedVideoReader:
     """
     Auto-healing threaded video capture for Wi-Fi/IP cameras.
@@ -46,7 +51,8 @@ class ThreadedVideoReader:
     - Thread never dies on stream drop, sleeps and retries
     """
 
-    RECONNECT_DELAY_SECONDS: float = 3.0
+    RECONNECT_DELAY_SECONDS: float = 2.0
+    MAX_RECONNECT_DELAY_SECONDS: float = 30.0
     MAX_CONSECUTIVE_FAILURES: int = 30
 
     def __init__(
@@ -76,6 +82,7 @@ class ThreadedVideoReader:
         self._frame_width: int = 0
         self._frame_height: int = 0
         self._reconnect_count: int = 0
+        self._current_reconnect_delay: float = self.RECONNECT_DELAY_SECONDS
 
     def start(self) -> bool:
         """
@@ -124,6 +131,9 @@ class ThreadedVideoReader:
             )
 
             source = parse_source(self.camera_url)
+
+            if _is_rtsp_source(str(source)):
+                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|stimeout;5000000|buffer_size;1048576"
             
             if isinstance(source, int):
                 self._cap = cv2.VideoCapture(source, cv2.CAP_DSHOW)
@@ -170,6 +180,7 @@ class ThreadedVideoReader:
             self._frame_height = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
             self._connected = True
+            self._current_reconnect_delay = self.RECONNECT_DELAY_SECONDS
             logger.info(
                 "Camera '%s' connected via %s. Resolution: %dx%d",
                 self.camera_id,
@@ -266,14 +277,20 @@ class ThreadedVideoReader:
         self._connected = False
         self._reconnect_count += 1
 
+        sleep_seconds = self._current_reconnect_delay
+        self._current_reconnect_delay = min(
+            self._current_reconnect_delay * 1.5,
+            self.MAX_RECONNECT_DELAY_SECONDS,
+        )
+
         logger.info(
             "Camera '%s': Sleeping %.1f seconds before reconnect attempt #%d",
             self.camera_id,
-            self.RECONNECT_DELAY_SECONDS,
+            sleep_seconds,
             self._reconnect_count
         )
 
-        time.sleep(self.RECONNECT_DELAY_SECONDS)
+        time.sleep(sleep_seconds)
 
         if self._running:
             success = self._initialize_capture()
@@ -285,9 +302,10 @@ class ThreadedVideoReader:
                 )
             else:
                 logger.warning(
-                    "Camera '%s': Reconnect attempt #%d failed. Will retry.",
+                    "Camera '%s': Reconnect attempt #%d failed. Will retry with backoff %.1fs.",
                     self.camera_id,
-                    self._reconnect_count
+                    self._reconnect_count,
+                    self._current_reconnect_delay,
                 )
 
     def get_frame(self) -> Optional[np.ndarray]:

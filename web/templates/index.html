@@ -6,505 +6,454 @@
     <title>Edge Vision Counter V2 - Dashboard</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
         :root {
-            --bg-primary: #0B0C10;
-            --bg-secondary: #1F2833;
-            --bg-tertiary: #2C3E50;
-            --accent-primary: #66FCF1;
-            --accent-secondary: #45A29E;
-            --text-primary: #C5C6C7;
-            --text-bright: #FFFFFF;
-            --success: #00D26A;
-            --warning: #FFBE0B;
-            --danger: #FF006E;
-            --gradient-primary: linear-gradient(135deg, #66FCF1 0%, #45A29E 100%);
-            --shadow-glow: 0 0 40px rgba(102, 252, 241, 0.15);
-            --shadow-card: 0 8px 32px rgba(0, 0, 0, 0.4);
+            --bg: #07111a;
+            --bg-soft: rgba(11, 22, 34, 0.88);
+            --panel: rgba(14, 28, 43, 0.92);
+            --line: rgba(121, 226, 255, 0.14);
+            --accent: #79e2ff;
+            --accent-2: #33d6a6;
+            --danger: #ff5470;
+            --warning: #ffcd57;
+            --text: #d6e4f0;
+            --text-soft: #8aa0b4;
+            --glow: 0 18px 50px rgba(0, 0, 0, 0.35);
         }
 
+        * { box-sizing: border-box; }
+        html, body { margin: 0; padding: 0; }
         body {
             font-family: 'Space Grotesk', sans-serif;
-            background-color: var(--bg-primary);
-            color: var(--text-primary);
+            color: var(--text);
             min-height: 100vh;
-            overflow-x: hidden;
+            background:
+                radial-gradient(circle at top left, rgba(121, 226, 255, 0.14), transparent 28%),
+                radial-gradient(circle at top right, rgba(51, 214, 166, 0.10), transparent 22%),
+                linear-gradient(180deg, #08111a 0%, #050b12 100%);
+        }
+
+        body::before {
+            content: '';
+            position: fixed;
+            inset: 0;
+            pointer-events: none;
+            background-image: linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px);
+            background-size: 28px 28px;
+            mask-image: linear-gradient(180deg, rgba(0,0,0,0.5), transparent 85%);
         }
 
         .container {
-            max-width: 1400px;
+            width: min(1480px, calc(100% - 32px));
             margin: 0 auto;
-            padding: 40px 20px;
+            padding: 28px 0 40px;
+            position: relative;
+            z-index: 1;
         }
 
         header {
-            text-align: center;
-            margin-bottom: 60px;
+            display: grid;
+            gap: 18px;
+            margin-bottom: 28px;
         }
 
-        .logo {
+        .hero {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: space-between;
+            gap: 16px;
+            align-items: center;
+            padding: 22px 24px;
+            border: 1px solid var(--line);
+            border-radius: 24px;
+            background: var(--bg-soft);
+            box-shadow: var(--glow);
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .brand-mark {
+            width: 54px;
+            height: 54px;
+            border-radius: 16px;
+            display: grid;
+            place-items: center;
+            background: linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%);
+            color: #06111a;
+            font-weight: 700;
+            letter-spacing: 0.06em;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: clamp(1.8rem, 3vw, 2.7rem);
+            line-height: 1.05;
+        }
+
+        .subtitle {
+            margin: 4px 0 0;
+            color: var(--text-soft);
+            letter-spacing: 0.16em;
+            text-transform: uppercase;
+            font-size: 0.78rem;
+        }
+
+        .meta-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            justify-content: flex-end;
+        }
+
+        .pill {
             display: inline-flex;
             align-items: center;
+            gap: 8px;
+            padding: 10px 14px;
+            border-radius: 999px;
+            border: 1px solid var(--line);
+            background: rgba(255, 255, 255, 0.03);
+            color: var(--text-soft);
+            font-size: 0.82rem;
+        }
+
+        .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--danger); box-shadow: 0 0 0 6px rgba(255, 84, 112, 0.12); }
+        .dot.connected { background: var(--accent-2); box-shadow: 0 0 0 6px rgba(51, 214, 166, 0.12); }
+
+        .status-grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
             gap: 16px;
             margin-bottom: 16px;
         }
 
-        .logo-icon {
-            width: 48px;
-            height: 48px;
-            background: var(--gradient-primary);
-            border-radius: 12px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 24px;
-            font-weight: 700;
-            color: var(--bg-primary);
+        @media (max-width: 1100px) { .status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+        @media (max-width: 680px) { .status-grid { grid-template-columns: 1fr; } }
+
+        .stat-card {
+            padding: 22px;
+            border-radius: 22px;
+            background: var(--panel);
+            border: 1px solid var(--line);
+            box-shadow: var(--glow);
+            position: relative;
+            overflow: hidden;
         }
 
-        h1 {
-            font-size: 2.5rem;
-            font-weight: 700;
-            background: var(--gradient-primary);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-        }
-
-        .subtitle {
-            font-size: 1rem;
-            color: var(--text-primary);
-            font-weight: 300;
-            letter-spacing: 2px;
-            text-transform: uppercase;
-        }
-
-        .status-bar {
-            display: flex;
-            justify-content: center;
-            gap: 24px;
-            margin-top: 20px;
-            flex-wrap: wrap;
-        }
-
-        .status-item {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            font-size: 0.875rem;
-            color: var(--text-primary);
-        }
-
-        .status-dot {
-            width: 10px;
-            height: 10px;
+        .stat-card::after {
+            content: '';
+            position: absolute;
+            inset: auto -10% -50% auto;
+            width: 180px;
+            height: 180px;
             border-radius: 50%;
-            animation: pulse 2s infinite;
+            background: radial-gradient(circle, rgba(121, 226, 255, 0.18), transparent 68%);
+            pointer-events: none;
         }
 
-        .status-dot.connected {
-            background-color: var(--success);
-        }
-
-        .status-dot.disconnected {
-            background-color: var(--danger);
-        }
-
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
-        }
-
-        .main-grid {
-            display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 24px;
-            margin-bottom: 40px;
-        }
-
-        @media (max-width: 1024px) {
-            .main-grid {
-                grid-template-columns: repeat(2, 1fr);
-            }
-        }
-
-        @media (max-width: 768px) {
-            .main-grid {
-                grid-template-columns: 1fr;
-            }
-        }
-
-        .card {
-            background: var(--bg-secondary);
-            border-radius: 20px;
-            padding: 32px;
-            box-shadow: var(--shadow-card);
-            border: 1px solid rgba(102, 252, 241, 0.1);
-            transition: transform 0.3s ease, box-shadow 0.3s ease;
-        }
-
-        .card:hover {
-            transform: translateY(-4px);
-            box-shadow: var(--shadow-glow);
-        }
-
-        .card-label {
-            font-size: 0.875rem;
-            font-weight: 500;
-            color: var(--text-primary);
+        .stat-label {
+            color: var(--text-soft);
             text-transform: uppercase;
-            letter-spacing: 1.5px;
+            letter-spacing: 0.16em;
+            font-size: 0.72rem;
+            margin-bottom: 12px;
+        }
+
+        .stat-value {
+            font-size: clamp(2rem, 4vw, 3.7rem);
+            font-weight: 700;
+            line-height: 1;
+        }
+
+        .stat-note {
+            margin-top: 10px;
+            color: var(--text-soft);
+            font-size: 0.84rem;
+        }
+
+        .stat-value.in { color: var(--accent-2); }
+        .stat-value.out { color: var(--danger); }
+        .stat-value.gpu { color: var(--warning); }
+
+        .panel-grid {
+            display: grid;
+            grid-template-columns: 1.5fr 1fr;
+            gap: 16px;
             margin-bottom: 16px;
         }
 
-        .card-value {
-            font-size: 4rem;
-            font-weight: 700;
-            line-height: 1;
-            transition: all 0.3s ease;
+        @media (max-width: 1100px) { .panel-grid { grid-template-columns: 1fr; } }
+
+        .panel {
+            padding: 22px;
+            border-radius: 24px;
+            background: var(--panel);
+            border: 1px solid var(--line);
+            box-shadow: var(--glow);
         }
 
-        .card-in .card-value {
-            color: var(--success);
+        .panel-head {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            align-items: center;
+            margin-bottom: 16px;
         }
 
-        .card-out .card-value {
-            color: var(--danger);
+        .panel-title {
+            margin: 0;
+            font-size: 1rem;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
         }
 
-        .card-inside .card-value {
-            background: var(--gradient-primary);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
+        .panel-subtitle {
+            color: var(--text-soft);
+            font-size: 0.84rem;
         }
 
-        .card-inside {
-            grid-column: span 1;
+        .chart-wrap {
+            position: relative;
+            height: 320px;
         }
 
-        @media (min-width: 1025px) {
-            .main-grid {
-                grid-template-columns: 1fr 1.5fr 1fr;
-            }
-            
-            .card-inside {
-                padding: 48px;
-            }
-
-            .card-inside .card-value {
-                font-size: 5rem;
-            }
+        .camera-strip {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 16px;
+            margin: 16px 0;
         }
+
+        @media (max-width: 900px) { .camera-strip { grid-template-columns: 1fr; } }
+
+        .camera-card {
+            padding: 18px;
+            border-radius: 20px;
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.06);
+        }
+
+        .camera-card h3 {
+            margin: 0 0 12px;
+            font-size: 1rem;
+        }
+
+        .camera-kpis {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 10px;
+        }
+
+        .camera-kpi {
+            padding: 12px;
+            border-radius: 16px;
+            background: rgba(255,255,255,0.04);
+        }
+
+        .camera-kpi .value { display: block; font-size: 1.35rem; font-weight: 700; }
+        .camera-kpi .label { display: block; color: var(--text-soft); font-size: 0.72rem; letter-spacing: 0.12em; text-transform: uppercase; margin-top: 4px; }
 
         .admin-panel {
-            background: var(--bg-secondary);
-            border-radius: 20px;
-            padding: 40px;
-            box-shadow: var(--shadow-card);
-            border: 1px solid rgba(102, 252, 241, 0.1);
-        }
-
-        .admin-header {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            margin-bottom: 32px;
-        }
-
-        .admin-icon {
-            width: 36px;
-            height: 36px;
-            background: var(--bg-tertiary);
-            border-radius: 10px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 18px;
-        }
-
-        .admin-title {
-            font-size: 1.25rem;
-            font-weight: 600;
-            color: var(--text-bright);
+            padding: 22px;
+            border-radius: 24px;
+            background: var(--panel);
+            border: 1px solid var(--line);
+            box-shadow: var(--glow);
         }
 
         .admin-grid {
             display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 32px;
-        }
-
-        @media (max-width: 768px) {
-            .admin-grid {
-                grid-template-columns: 1fr;
-            }
-        }
-
-        .admin-section {
-            display: flex;
-            flex-direction: column;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
             gap: 16px;
         }
 
-        .admin-section-title {
-            font-size: 0.875rem;
-            font-weight: 500;
-            color: var(--text-primary);
-            text-transform: uppercase;
-            letter-spacing: 1px;
+        @media (max-width: 900px) { .admin-grid { grid-template-columns: 1fr; } }
+
+        .admin-copy {
+            color: var(--text-soft);
+            line-height: 1.6;
+            margin: 0;
+            font-size: 0.92rem;
         }
 
-        .admin-section-desc {
-            font-size: 0.8rem;
-            color: var(--accent-secondary);
-            line-height: 1.5;
-        }
-
-        .input-group {
+        .input-row {
             display: flex;
-            gap: 12px;
+            gap: 10px;
+            margin-top: 12px;
         }
 
-        .input-field {
+        .input {
             flex: 1;
-            background: var(--bg-primary);
-            border: 2px solid var(--bg-tertiary);
-            border-radius: 12px;
-            padding: 16px 20px;
-            font-family: 'Space Grotesk', sans-serif;
-            font-size: 1rem;
-            color: var(--text-bright);
+            min-width: 0;
+            padding: 14px 16px;
+            border-radius: 14px;
+            border: 1px solid rgba(255,255,255,0.10);
+            background: rgba(255,255,255,0.04);
+            color: var(--text);
+            font: inherit;
             outline: none;
-            transition: border-color 0.3s ease;
         }
 
-        .input-field:focus {
-            border-color: var(--accent-primary);
-        }
-
-        .input-field::placeholder {
-            color: var(--text-primary);
-            opacity: 0.5;
-        }
+        .input:focus { border-color: rgba(121, 226, 255, 0.65); }
 
         .btn {
-            font-family: 'Space Grotesk', sans-serif;
-            font-size: 0.875rem;
-            font-weight: 600;
-            padding: 16px 28px;
-            border-radius: 12px;
-            border: none;
+            padding: 14px 18px;
+            border: 0;
+            border-radius: 14px;
+            font: inherit;
+            font-weight: 700;
             cursor: pointer;
-            transition: all 0.3s ease;
-            text-transform: uppercase;
-            letter-spacing: 1px;
+            transition: transform 0.18s ease, opacity 0.18s ease, box-shadow 0.18s ease;
         }
+
+        .btn:hover { transform: translateY(-1px); }
+        .btn:disabled { opacity: 0.55; cursor: not-allowed; transform: none; }
 
         .btn-primary {
-            background: var(--gradient-primary);
-            color: var(--bg-primary);
-        }
-
-        .btn-primary:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 8px 24px rgba(102, 252, 241, 0.3);
+            background: linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%);
+            color: #06111a;
+            box-shadow: 0 14px 30px rgba(51, 214, 166, 0.18);
         }
 
         .btn-danger {
             background: transparent;
-            border: 2px solid var(--danger);
             color: var(--danger);
-        }
-
-        .btn-danger:hover {
-            background: var(--danger);
-            color: var(--text-bright);
-            transform: translateY(-2px);
-        }
-
-        .btn:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-            transform: none !important;
+            border: 1px solid rgba(255, 84, 112, 0.35);
         }
 
         .toast {
             position: fixed;
-            bottom: 32px;
-            right: 32px;
-            padding: 16px 24px;
-            border-radius: 12px;
-            font-size: 0.875rem;
-            font-weight: 500;
+            right: 18px;
+            bottom: 18px;
+            padding: 14px 18px;
+            border-radius: 14px;
+            background: rgba(6, 14, 22, 0.96);
+            border: 1px solid var(--line);
+            box-shadow: var(--glow);
             display: none;
-            animation: slideIn 0.3s ease;
-            z-index: 1000;
+            z-index: 50;
         }
 
-        .toast.success {
-            background: var(--success);
-            color: var(--bg-primary);
-        }
-
-        .toast.error {
-            background: var(--danger);
-            color: var(--text-bright);
-        }
-
-        @keyframes slideIn {
-            from {
-                transform: translateX(100%);
-                opacity: 0;
-            }
-            to {
-                transform: translateX(0);
-                opacity: 1;
-            }
-        }
-
-        .connection-status {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 8px;
-            padding: 12px 20px;
-            background: var(--bg-tertiary);
-            border-radius: 100px;
-            font-size: 0.75rem;
-            font-weight: 500;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-            margin-top: 8px;
-        }
-
-        .camera-info {
-            margin-top: 20px;
-            padding-top: 20px;
-            border-top: 1px solid var(--bg-tertiary);
-            display: flex;
-            justify-content: center;
-            gap: 32px;
-            flex-wrap: wrap;
-        }
-
-        .camera-stat {
-            text-align: center;
-        }
-
-        .camera-stat-value {
-            font-size: 1.5rem;
-            font-weight: 600;
-            color: var(--text-bright);
-        }
-
-        .camera-stat-label {
-            font-size: 0.75rem;
-            color: var(--text-primary);
-            text-transform: uppercase;
-            letter-spacing: 1px;
-            margin-top: 4px;
-        }
+        .toast.success { color: var(--accent-2); }
+        .toast.error { color: var(--danger); }
 
         footer {
+            margin-top: 18px;
+            color: var(--text-soft);
             text-align: center;
-            margin-top: 60px;
-            padding: 20px;
-            font-size: 0.75rem;
-            color: var(--text-primary);
-            opacity: 0.6;
+            font-size: 0.84rem;
+            padding: 12px 0 4px;
         }
     </style>
 </head>
 <body>
     <div class="container">
         <header>
-            <div class="logo">
-                <div class="logo-icon">EV</div>
-                <h1>Edge Vision Counter</h1>
-            </div>
-            <p class="subtitle">Real-Time People Counting System V2</p>
-            <div class="status-bar">
-                <div class="status-item">
-                    <div class="status-dot" id="sseStatus"></div>
-                    <span id="sseStatusText">Connecting...</span>
+            <div class="hero">
+                <div class="brand">
+                    <div class="brand-mark">EV</div>
+                    <div>
+                        <h1>Edge Vision Counter</h1>
+                        <p class="subtitle">Production dashboard for multi-camera people counting</p>
+                    </div>
                 </div>
-                <div class="status-item">
-                    <span id="cameraStatus">Cameras: -/-</span>
+                <div class="meta-row">
+                    <div class="pill"><span class="dot" id="sseDot"></span><span id="sseState">Connecting</span></div>
+                    <div class="pill"><span id="cameraState">Cameras: -/-</span></div>
+                    <div class="pill"><span id="serviceUrl">http://counter-gww.local:5000</span></div>
                 </div>
             </div>
         </header>
 
-        <div class="main-grid">
-            <div class="card card-in">
-                <div class="card-label">Total In</div>
-                <div class="card-value" id="totalIn">0</div>
-            </div>
+        <section class="status-grid">
+            <article class="stat-card">
+                <div class="stat-label">Total In</div>
+                <div class="stat-value in" id="totalIn">0</div>
+                <div class="stat-note">Entries recorded in SQLite</div>
+            </article>
+            <article class="stat-card">
+                <div class="stat-label">Currently Inside</div>
+                <div class="stat-value" id="currentInside">0</div>
+                <div class="stat-note">Live aggregate across all cameras</div>
+            </article>
+            <article class="stat-card">
+                <div class="stat-label">Total Out</div>
+                <div class="stat-value out" id="totalOut">0</div>
+                <div class="stat-note">Exit events recorded in SQLite</div>
+            </article>
+            <article class="stat-card">
+                <div class="stat-label">GPU Utilization</div>
+                <div class="stat-value gpu" id="gpuUtil">--%</div>
+                <div class="stat-note" id="gpuMemory">VRAM: -- / -- MB</div>
+            </article>
+        </section>
 
-            <div class="card card-inside">
-                <div class="card-label">Currently Inside</div>
-                <div class="card-value" id="currentInside">0</div>
-                <div class="connection-status">
-                    <div class="status-dot" id="liveIndicator"></div>
-                    <span>Live Data</span>
+        <section class="panel-grid">
+            <article class="panel">
+                <div class="panel-head">
+                    <div>
+                        <h2 class="panel-title">Time-Series Trend</h2>
+                        <div class="panel-subtitle">15-minute aggregation from the SQLite event log</div>
+                    </div>
+                </div>
+                <div class="chart-wrap">
+                    <canvas id="trendChart"></canvas>
+                </div>
+            </article>
+            <article class="panel">
+                <div class="panel-head">
+                    <div>
+                        <h2 class="panel-title">Camera Summary</h2>
+                        <div class="panel-subtitle">Per-camera IN/OUT totals for the current session</div>
+                    </div>
+                </div>
+                <div class="chart-wrap">
+                    <canvas id="cameraChart"></canvas>
+                </div>
+            </article>
+        </section>
+
+        <section class="panel">
+            <div class="panel-head">
+                <div>
+                    <h2 class="panel-title">Camera Health</h2>
+                    <div class="panel-subtitle">Connection and local count snapshot per stream</div>
                 </div>
             </div>
+            <div class="camera-strip" id="cameraStrip"></div>
+        </section>
 
-            <div class="card card-out">
-                <div class="card-label">Total Out</div>
-                <div class="card-value" id="totalOut">0</div>
+        <section class="admin-panel">
+            <div class="panel-head">
+                <div>
+                    <h2 class="panel-title">Admin Control</h2>
+                    <div class="panel-subtitle">Manual calibration and session reset</div>
+                </div>
             </div>
-        </div>
-
-        <div class="admin-panel">
-            <div class="admin-header">
-                <div class="admin-icon">A</div>
-                <h2 class="admin-title">Admin Control Panel</h2>
-            </div>
-
             <div class="admin-grid">
-                <div class="admin-section">
-                    <div class="admin-section-title">Manual Calibration</div>
-                    <p class="admin-section-desc">
-                        Set the current number of people inside. The system will automatically
-                        adjust the counts to match this value.
-                    </p>
-                    <div class="input-group">
-                        <input 
-                            type="number" 
-                            class="input-field" 
-                            id="targetCount" 
-                            placeholder="Enter current people count"
-                            min="0"
-                        >
+                <div>
+                    <p class="admin-copy">Set the current people-inside count if you need to reconcile the live total with an external headcount. The system adjusts the stored exit count to preserve the balance.</p>
+                    <div class="input-row">
+                        <input type="number" min="0" class="input" id="targetCount" placeholder="Target inside count">
                         <button class="btn btn-primary" id="setCountBtn">Set Count</button>
                     </div>
                 </div>
-
-                <div class="admin-section">
-                    <div class="admin-section-title">Reset All Data</div>
-                    <p class="admin-section-desc">
-                        Reset all counting data to zero. This action cannot be undone.
-                        Use this when starting a new counting session.
-                    </p>
-                    <button class="btn btn-danger" id="resetBtn">Reset All Data</button>
+                <div>
+                    <p class="admin-copy">Reset the active session counters back to zero. Historical rows stay in SQLite, but new charts will start a fresh session window.</p>
+                    <div class="input-row">
+                        <button class="btn btn-danger" id="resetBtn">Reset Session</button>
+                    </div>
                 </div>
             </div>
-        </div>
+        </section>
 
-        <div class="camera-info" id="cameraInfo">
-        </div>
-
-        <footer>
-            Edge Vision Counter V2 (Supervision Edition) - Enterprise People Counting System
-        </footer>
+        <footer>Edge Vision Counter V2 - 8-hour production monitoring dashboard</footer>
     </div>
 
     <div class="toast" id="toast"></div>
@@ -514,55 +463,203 @@
             totalIn: document.getElementById('totalIn'),
             totalOut: document.getElementById('totalOut'),
             currentInside: document.getElementById('currentInside'),
-            sseStatus: document.getElementById('sseStatus'),
-            sseStatusText: document.getElementById('sseStatusText'),
-            cameraStatus: document.getElementById('cameraStatus'),
-            liveIndicator: document.getElementById('liveIndicator'),
+            gpuUtil: document.getElementById('gpuUtil'),
+            gpuMemory: document.getElementById('gpuMemory'),
+            cameraState: document.getElementById('cameraState'),
+            serviceUrl: document.getElementById('serviceUrl'),
+            sseDot: document.getElementById('sseDot'),
+            sseState: document.getElementById('sseState'),
+            cameraStrip: document.getElementById('cameraStrip'),
             targetCount: document.getElementById('targetCount'),
             setCountBtn: document.getElementById('setCountBtn'),
             resetBtn: document.getElementById('resetBtn'),
             toast: document.getElementById('toast'),
-            cameraInfo: document.getElementById('cameraInfo'),
         };
 
         let eventSource = null;
         let reconnectAttempts = 0;
-        const maxReconnectAttempts = 10;
-        const reconnectDelay = 3000;
+        let trendChart = null;
+        let cameraChart = null;
 
         function showToast(message, type = 'success') {
             elements.toast.textContent = message;
             elements.toast.className = `toast ${type}`;
             elements.toast.style.display = 'block';
-            
-            setTimeout(() => {
+            clearTimeout(window.toastTimer);
+            window.toastTimer = setTimeout(() => {
                 elements.toast.style.display = 'none';
-            }, 4000);
+            }, 3500);
         }
 
-        function updateDisplay(data) {
-            const displayCount = Math.max(0, data.current_inside);
-            
-            elements.totalIn.textContent = data.total_in.toLocaleString();
-            elements.totalOut.textContent = data.total_out.toLocaleString();
-            elements.currentInside.textContent = displayCount.toLocaleString();
-            
-            if (data.camera_count !== undefined) {
-                elements.cameraStatus.textContent = `Cameras: ${data.connected_count || 0}/${data.camera_count}`;
+        function formatNumber(value) {
+            return Number(value || 0).toLocaleString();
+        }
+
+        function updateSummary(data) {
+            elements.totalIn.textContent = formatNumber(data.total_in);
+            elements.totalOut.textContent = formatNumber(data.total_out);
+            elements.currentInside.textContent = formatNumber(Math.max(0, data.current_inside || 0));
+            elements.cameraState.textContent = `Cameras: ${data.connected_count || 0}/${data.camera_count || 0}`;
+            if (data.service_url) {
+                elements.serviceUrl.textContent = data.service_url;
+            }
+
+            if (data.gpu) {
+                const util = data.gpu.utilization_percent;
+                elements.gpuUtil.textContent = util === null || util === undefined ? '--%' : `${Math.round(util)}%`;
+                const used = data.gpu.memory_used_mb ?? data.gpu.memory_allocated_mb ?? '--';
+                const total = data.gpu.memory_total_mb ?? '--';
+                elements.gpuMemory.textContent = `VRAM: ${used} / ${total} MB`;
             }
         }
 
-        function setSSEStatus(connected) {
-            if (connected) {
-                elements.sseStatus.className = 'status-dot connected';
-                elements.sseStatusText.textContent = 'Connected';
-                elements.liveIndicator.className = 'status-dot connected';
-                reconnectAttempts = 0;
-            } else {
-                elements.sseStatus.className = 'status-dot disconnected';
-                elements.sseStatusText.textContent = 'Disconnected';
-                elements.liveIndicator.className = 'status-dot disconnected';
+        function renderCameraStrip(cameras = []) {
+            if (!cameras.length) {
+                elements.cameraStrip.innerHTML = '<div class="camera-card"><h3>No camera data yet</h3><div class="admin-copy">Waiting for the first aggregate payload.</div></div>';
+                return;
             }
+
+            elements.cameraStrip.innerHTML = cameras.map((camera) => {
+                const status = camera.connected ? 'Connected' : 'Disconnected';
+                return `
+                    <article class="camera-card">
+                        <h3>${camera.camera_id}</h3>
+                        <div class="pill" style="margin-bottom:12px; width: fit-content;">
+                            <span class="dot ${camera.connected ? 'connected' : ''}"></span>
+                            <span>${status}</span>
+                        </div>
+                        <div class="camera-kpis">
+                            <div class="camera-kpi"><span class="value">${formatNumber(camera.local_in)}</span><span class="label">IN</span></div>
+                            <div class="camera-kpi"><span class="value">${formatNumber(camera.local_out)}</span><span class="label">OUT</span></div>
+                            <div class="camera-kpi"><span class="value">${formatNumber(camera.reconnect_count || 0)}</span><span class="label">Reconnects</span></div>
+                        </div>
+                    </article>
+                `;
+            }).join('');
+        }
+
+        function renderTrendChart(timeSeries = []) {
+            const labels = timeSeries.map((item) => item.interval_start.slice(11, 16));
+            const inSeries = timeSeries.map((item) => item.total_in || 0);
+            const outSeries = timeSeries.map((item) => item.total_out || 0);
+
+            const ctx = document.getElementById('trendChart');
+            if (trendChart) {
+                trendChart.data.labels = labels;
+                trendChart.data.datasets[0].data = inSeries;
+                trendChart.data.datasets[1].data = outSeries;
+                trendChart.update('none');
+                return;
+            }
+
+            trendChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels,
+                    datasets: [
+                        {
+                            label: 'Entries',
+                            data: inSeries,
+                            borderColor: '#33d6a6',
+                            backgroundColor: 'rgba(51, 214, 166, 0.12)',
+                            tension: 0.35,
+                            fill: true,
+                        },
+                        {
+                            label: 'Exits',
+                            data: outSeries,
+                            borderColor: '#ff5470',
+                            backgroundColor: 'rgba(255, 84, 112, 0.10)',
+                            tension: 0.35,
+                            fill: true,
+                        },
+                    ],
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: false,
+                    plugins: {
+                        legend: {
+                            labels: { color: '#d6e4f0' },
+                        },
+                    },
+                    scales: {
+                        x: { ticks: { color: '#8aa0b4' }, grid: { color: 'rgba(255,255,255,0.05)' } },
+                        y: { beginAtZero: true, ticks: { color: '#8aa0b4' }, grid: { color: 'rgba(255,255,255,0.05)' } },
+                    },
+                },
+            });
+        }
+
+        function renderCameraChart(cameraSummary = []) {
+            const labels = cameraSummary.map((item) => item.camera_id);
+            const inSeries = cameraSummary.map((item) => item.total_in || 0);
+            const outSeries = cameraSummary.map((item) => item.total_out || 0);
+
+            const ctx = document.getElementById('cameraChart');
+            if (cameraChart) {
+                cameraChart.data.labels = labels;
+                cameraChart.data.datasets[0].data = inSeries;
+                cameraChart.data.datasets[1].data = outSeries;
+                cameraChart.update('none');
+                return;
+            }
+
+            cameraChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels,
+                    datasets: [
+                        {
+                            label: 'IN',
+                            data: inSeries,
+                            backgroundColor: 'rgba(51, 214, 166, 0.75)',
+                        },
+                        {
+                            label: 'OUT',
+                            data: outSeries,
+                            backgroundColor: 'rgba(255, 84, 112, 0.75)',
+                        },
+                    ],
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: false,
+                    plugins: {
+                        legend: { labels: { color: '#d6e4f0' } },
+                    },
+                    scales: {
+                        x: { ticks: { color: '#8aa0b4' }, grid: { color: 'rgba(255,255,255,0.05)' } },
+                        y: { beginAtZero: true, ticks: { color: '#8aa0b4' }, grid: { color: 'rgba(255,255,255,0.05)' } },
+                    },
+                },
+            });
+        }
+
+        async function refreshStats() {
+            try {
+                const response = await fetch('/api/stats?interval_minutes=15', { cache: 'no-store' });
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.error || 'Failed to load stats');
+                }
+
+                updateSummary(data);
+                renderCameraStrip(data.cameras || []);
+                renderTrendChart(data.time_series || []);
+                renderCameraChart(data.camera_summary || []);
+            } catch (error) {
+                console.error(error);
+                showToast('Failed to refresh analytics', 'error');
+            }
+        }
+
+        function setSSEConnected(connected) {
+            elements.sseDot.className = `dot ${connected ? 'connected' : ''}`;
+            elements.sseState.textContent = connected ? 'Connected' : 'Disconnected';
         }
 
         function connectSSE() {
@@ -572,83 +669,71 @@
 
             eventSource = new EventSource('/stream');
 
-            eventSource.onopen = function() {
-                setSSEStatus(true);
+            eventSource.onopen = () => {
+                reconnectAttempts = 0;
+                setSSEConnected(true);
             };
 
-            eventSource.onmessage = function(event) {
+            eventSource.onmessage = (event) => {
                 try {
                     const data = JSON.parse(event.data);
                     if (!data.error) {
-                        updateDisplay(data);
+                        elements.totalIn.textContent = formatNumber(data.total_in);
+                        elements.totalOut.textContent = formatNumber(data.total_out);
+                        elements.currentInside.textContent = formatNumber(Math.max(0, data.current_inside || 0));
+                        elements.cameraState.textContent = `Cameras: ${data.connected_count || 0}/${data.camera_count || 0}`;
                     }
-                } catch (e) {
-                    console.error('Error parsing SSE data:', e);
+                } catch (error) {
+                    console.error('Failed to parse SSE payload', error);
                 }
             };
 
-            eventSource.onerror = function() {
-                setSSEStatus(false);
+            eventSource.onerror = () => {
+                setSSEConnected(false);
                 eventSource.close();
-
-                if (reconnectAttempts < maxReconnectAttempts) {
-                    reconnectAttempts++;
-                    elements.sseStatusText.textContent = `Reconnecting (${reconnectAttempts})...`;
-                    setTimeout(connectSSE, reconnectDelay);
-                } else {
-                    elements.sseStatusText.textContent = 'Connection failed';
+                if (reconnectAttempts < 10) {
+                    reconnectAttempts += 1;
+                    setTimeout(connectSSE, 3000);
                 }
             };
         }
 
         async function setCount() {
             const targetValue = elements.targetCount.value.trim();
-            
-            if (!targetValue || isNaN(targetValue) || parseInt(targetValue) < 0) {
-                showToast('Please enter a valid non-negative number', 'error');
+            if (!targetValue || Number(targetValue) < 0) {
+                showToast('Enter a valid non-negative number', 'error');
                 return;
             }
 
             elements.setCountBtn.disabled = true;
-            elements.setCountBtn.textContent = 'Setting...';
+            elements.setCountBtn.textContent = 'Applying...';
 
             try {
                 const response = await fetch('/api/set_count', {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                        target_inside: parseInt(targetValue)
-                    }),
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ target_inside: Number(targetValue) }),
                 });
-
                 const data = await response.json();
 
-                if (response.ok && data.success) {
-                    showToast(data.message, 'success');
-                    elements.targetCount.value = '';
-                    if (data.stats) {
-                        updateDisplay({
-                            total_in: data.stats.total_in,
-                            total_out: data.stats.total_out,
-                            current_inside: data.stats.current_inside,
-                        });
-                    }
-                } else {
-                    showToast(data.error || 'Failed to set count', 'error');
+                if (!response.ok || !data.success) {
+                    throw new Error(data.error || 'Failed to set count');
                 }
-            } catch (e) {
-                showToast('Network error. Please try again.', 'error');
-                console.error('Set count error:', e);
+
+                showToast(data.message, 'success');
+                elements.targetCount.value = '';
+                await refreshStats();
+            } catch (error) {
+                console.error(error);
+                showToast(error.message || 'Network error', 'error');
             } finally {
                 elements.setCountBtn.disabled = false;
                 elements.setCountBtn.textContent = 'Set Count';
             }
         }
 
-        async function resetData() {
-            if (!confirm('Are you sure you want to reset all counting data? This cannot be undone.')) {
+        async function resetSession() {
+            if (!confirm('Reset the active session counters? Historical SQLite rows will remain.')) {
                 return;
             }
 
@@ -656,50 +741,38 @@
             elements.resetBtn.textContent = 'Resetting...';
 
             try {
-                const response = await fetch('/api/reset', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                });
-
+                const response = await fetch('/api/reset', { method: 'POST' });
                 const data = await response.json();
-
-                if (response.ok && data.success) {
-                    showToast(data.message, 'success');
-                    if (data.stats) {
-                        updateDisplay({
-                            total_in: data.stats.total_in,
-                            total_out: data.stats.total_out,
-                            current_inside: data.stats.current_inside,
-                        });
-                    }
-                } else {
-                    showToast(data.error || 'Failed to reset data', 'error');
+                if (!response.ok || !data.success) {
+                    throw new Error(data.error || 'Failed to reset');
                 }
-            } catch (e) {
-                showToast('Network error. Please try again.', 'error');
-                console.error('Reset error:', e);
+
+                showToast(data.message, 'success');
+                await refreshStats();
+            } catch (error) {
+                console.error(error);
+                showToast(error.message || 'Reset failed', 'error');
             } finally {
                 elements.resetBtn.disabled = false;
-                elements.resetBtn.textContent = 'Reset All Data';
+                elements.resetBtn.textContent = 'Reset Session';
             }
         }
 
         elements.setCountBtn.addEventListener('click', setCount);
-        elements.resetBtn.addEventListener('click', resetData);
-
-        elements.targetCount.addEventListener('keypress', function(e) {
-            if (e.key === 'Enter') {
+        elements.resetBtn.addEventListener('click', resetSession);
+        elements.targetCount.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') {
                 setCount();
             }
         });
 
-        document.addEventListener('DOMContentLoaded', function() {
+        document.addEventListener('DOMContentLoaded', async () => {
             connectSSE();
+            await refreshStats();
+            setInterval(refreshStats, 10000);
         });
 
-        window.addEventListener('beforeunload', function() {
+        window.addEventListener('beforeunload', () => {
             if (eventSource) {
                 eventSource.close();
             }

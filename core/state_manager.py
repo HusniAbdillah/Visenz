@@ -1,40 +1,41 @@
 """
 Thread-safe state persistence manager for edge-vision-counter V2.
-Handles saving and loading of counting state to local JSON file.
-Provides atomic operations for count manipulation with threading.Lock().
+
+Stores the current counts in SQLite and keeps a JSON snapshot for backward
+compatibility. Crossing events are journaled in SQLite for time-series analytics.
 """
+
+from __future__ import annotations
 
 import json
 import logging
 import threading
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any, Dict, Optional
 
 import config
+from core.analytics_db import AnalyticsDB
 
 logger = logging.getLogger(__name__)
 
 
 class StateManager:
-    """
-    Thread-safe state persistence manager.
-    Saves total_in and total_out to a local state.json file.
-    Resumes from existing state on initialization if file exists.
-    All read/write operations are protected by threading.Lock().
-    """
+    """Thread-safe state persistence and analytics coordinator."""
 
-    def __init__(self, state_file: str = "state.json") -> None:
-        """
-        Initialize the state manager.
-
-        Args:
-            state_file: Name of the JSON file to persist state.
-        """
+    def __init__(self, state_file: str = "state.json", db_file: str = "edge_vision_counter.db") -> None:
         self._state_path: Path = config.PROJECT_ROOT / state_file
+        self._db_path: Path = config.PROJECT_ROOT / db_file
+        self._analytics_db = AnalyticsDB(self._db_path)
         self._lock: threading.Lock = threading.Lock()
         self._total_in: int = 0
         self._total_out: int = 0
+        self._last_reset_at: str = self._utc_now()
         self._load_state()
+
+    @staticmethod
+    def _utc_now() -> str:
+        return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
     def _load_state(self) -> None:
         """
@@ -43,40 +44,50 @@ class StateManager:
         """
         with self._lock:
             try:
+                db_state = self._analytics_db.load_state()
+                self._total_in = int(db_state.get("total_in", 0))
+                self._total_out = int(db_state.get("total_out", 0))
+                self._last_reset_at = str(db_state.get("last_reset_at", self._utc_now()))
+                logger.info(
+                    "State loaded from SQLite %s: total_in=%d, total_out=%d",
+                    self._db_path,
+                    self._total_in,
+                    self._total_out,
+                )
+                self._save_state()
+                return
+            except Exception as db_error:
+                logger.warning("Failed to load state from SQLite %s: %s", self._db_path, str(db_error))
+
+            try:
                 if self._state_path.exists():
-                    with open(self._state_path, 'r', encoding='utf-8') as f:
+                    with open(self._state_path, "r", encoding="utf-8") as f:
                         data = json.load(f)
-                        self._total_in = int(data.get('total_in', 0))
-                        self._total_out = int(data.get('total_out', 0))
+                        self._total_in = int(data.get("total_in", 0))
+                        self._total_out = int(data.get("total_out", 0))
+                        self._last_reset_at = str(data.get("last_reset_at", self._utc_now()))
                         logger.info(
                             "State loaded from %s: total_in=%d, total_out=%d",
                             self._state_path,
                             self._total_in,
-                            self._total_out
+                            self._total_out,
                         )
                 else:
-                    logger.info(
-                        "State file not found at %s. Starting with zeros.",
-                        self._state_path
-                    )
+                    logger.info("State file not found at %s. Starting with zeros.", self._state_path)
                     self._total_in = 0
                     self._total_out = 0
+                    self._last_reset_at = self._utc_now()
+                self._analytics_db.save_state(self._total_in, self._total_out, self._last_reset_at)
             except (json.JSONDecodeError, ValueError, TypeError) as e:
-                logger.warning(
-                    "Failed to parse state file %s: %s. Starting with zeros.",
-                    self._state_path,
-                    str(e)
-                )
+                logger.warning("Failed to parse state file %s: %s. Starting with zeros.", self._state_path, str(e))
                 self._total_in = 0
                 self._total_out = 0
+                self._last_reset_at = self._utc_now()
             except Exception as e:
-                logger.error(
-                    "Unexpected error loading state from %s: %s. Starting with zeros.",
-                    self._state_path,
-                    str(e)
-                )
+                logger.error("Unexpected error loading state from %s: %s. Starting with zeros.", self._state_path, str(e))
                 self._total_in = 0
                 self._total_out = 0
+                self._last_reset_at = self._utc_now()
 
     def _save_state(self) -> None:
         """
@@ -85,16 +96,18 @@ class StateManager:
         """
         try:
             data = {
-                'total_in': self._total_in,
-                'total_out': self._total_out,
+                "total_in": self._total_in,
+                "total_out": self._total_out,
+                "last_reset_at": self._last_reset_at,
             }
-            with open(self._state_path, 'w', encoding='utf-8') as f:
+            with open(self._state_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
+            self._analytics_db.save_state(self._total_in, self._total_out, self._last_reset_at)
             logger.debug(
                 "State saved to %s: total_in=%d, total_out=%d",
                 self._state_path,
                 self._total_in,
-                self._total_out
+                self._total_out,
             )
         except Exception as e:
             logger.error("Failed to save state to %s: %s", self._state_path, str(e))
@@ -106,10 +119,7 @@ class StateManager:
         Args:
             count: Number to add (default 1).
         """
-        with self._lock:
-            self._total_in += count
-            self._save_state()
-            logger.info("Added %d to IN count. New total_in=%d", count, self._total_in)
+        self.record_crossing(camera_id="legacy", direction="IN", count=count)
 
     def add_out(self, count: int = 1) -> None:
         """
@@ -118,10 +128,43 @@ class StateManager:
         Args:
             count: Number to add (default 1).
         """
+        self.record_crossing(camera_id="legacy", direction="OUT", count=count)
+
+    def record_crossing(
+        self,
+        camera_id: str,
+        direction: str,
+        count: int = 1,
+        timestamp: Optional[str] = None,
+    ) -> None:
+        """Record one or more crossing events for a camera."""
+        direction = direction.upper()
+        if direction not in {"IN", "OUT"}:
+            raise ValueError(f"Invalid direction: {direction}")
+
+        if count <= 0:
+            return
+
+        timestamp = timestamp or self._utc_now()
+        events = [(timestamp, camera_id, direction) for _ in range(int(count))]
+
         with self._lock:
-            self._total_out += count
+            if direction == "IN":
+                self._total_in += int(count)
+            else:
+                self._total_out += int(count)
+
+            self._analytics_db.record_events(events)
             self._save_state()
-            logger.info("Added %d to OUT count. New total_out=%d", count, self._total_out)
+
+            logger.info(
+                "Recorded %d %s crossing(s) for camera '%s'. Totals: in=%d, out=%d",
+                count,
+                direction,
+                camera_id,
+                self._total_in,
+                self._total_out,
+            )
 
     def get_total_in(self) -> int:
         """
@@ -162,10 +205,22 @@ class StateManager:
         """
         with self._lock:
             return {
-                'total_in': self._total_in,
-                'total_out': self._total_out,
-                'current_inside': self._total_in - self._total_out,
+                "total_in": self._total_in,
+                "total_out": self._total_out,
+                "current_inside": self._total_in - self._total_out,
+                "last_reset_at": self._last_reset_at,
             }
+
+    def get_analytics(self, interval_minutes: int = 15) -> Dict[str, Any]:
+        """Return time-series and per-camera aggregates for the current session."""
+        with self._lock:
+            start_at = self._last_reset_at
+        return {
+            "interval_minutes": int(interval_minutes),
+            "start_at": start_at,
+            "time_series": self._analytics_db.fetch_time_series(start_at, interval_minutes=interval_minutes),
+            "camera_summary": self._analytics_db.fetch_camera_summary(start_at),
+        }
 
     def set_current_inside(self, target: int) -> None:
         """
@@ -194,29 +249,24 @@ class StateManager:
         with self._lock:
             self._total_in = 0
             self._total_out = 0
+            self._last_reset_at = self._utc_now()
             self._save_state()
             logger.info("State reset to zero. total_in=0, total_out=0")
 
-    def bulk_update(self, new_in: int, new_out: int) -> None:
+    def bulk_update(self, new_in: int, new_out: int, camera_id: str = "legacy", timestamp: Optional[str] = None) -> None:
         """
-        Add multiple counts at once (for efficiency).
+        Add multiple counts at once and log them as individual events.
 
         Args:
             new_in: Number of new entries to add.
             new_out: Number of new exits to add.
+            camera_id: Camera identifier for event logs.
+            timestamp: Optional timestamp shared by the batched events.
         """
         if new_in == 0 and new_out == 0:
             return
 
-        with self._lock:
-            self._total_in += new_in
-            self._total_out += new_out
-            self._save_state()
-            if new_in > 0 or new_out > 0:
-                logger.info(
-                    "Bulk update: added in=%d, out=%d. Totals: in=%d, out=%d",
-                    new_in,
-                    new_out,
-                    self._total_in,
-                    self._total_out
-                )
+        if new_in > 0:
+            self.record_crossing(camera_id=camera_id, direction="IN", count=new_in, timestamp=timestamp)
+        if new_out > 0:
+            self.record_crossing(camera_id=camera_id, direction="OUT", count=new_out, timestamp=timestamp)

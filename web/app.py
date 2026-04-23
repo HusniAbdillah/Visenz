@@ -4,9 +4,13 @@ Provides REST endpoints for system health, aggregated stats, calibration, and re
 Multi-camera dashboard support with real-time SSE updates.
 """
 
-import logging
+import atexit
 import json
+import logging
+import importlib
+import socket
 import time
+from datetime import datetime
 from typing import Iterator, Optional
 from flask import Flask, render_template, Response, jsonify, request
 
@@ -20,6 +24,8 @@ app.config['JSON_SORT_KEYS'] = False
 
 camera_manager = None
 state_manager: Optional[StateManager] = None
+_mdns_zeroconf = None
+_mdns_service_info = None
 
 
 def set_camera_manager(manager) -> None:
@@ -46,6 +52,74 @@ def set_state_manager(manager: StateManager) -> None:
     global state_manager
     state_manager = manager
     logger.info("StateManager instance set in Flask app")
+
+
+def _resolve_host_ip() -> str:
+    """Resolve the primary non-loopback IPv4 address for mDNS advertisement."""
+    try:
+        host_name = socket.gethostname()
+        candidates = socket.gethostbyname_ex(host_name)[2]
+        for candidate in candidates:
+            if not candidate.startswith("127."):
+                return candidate
+    except Exception:
+        pass
+
+    return "127.0.0.1"
+
+
+def start_mdns_service(port: int = config.FLASK_PORT) -> bool:
+    """Advertise the dashboard as counter-gww.local over mDNS when available."""
+    global _mdns_zeroconf, _mdns_service_info
+
+    if not getattr(config, "MDNS_ENABLED", True):
+        return False
+
+    if _mdns_zeroconf is not None:
+        return True
+
+    try:
+        zeroconf_module = importlib.import_module("zeroconf")
+        Zeroconf = getattr(zeroconf_module, "Zeroconf")
+        ServiceInfo = getattr(zeroconf_module, "ServiceInfo")
+        host_ip = _resolve_host_ip()
+        service_name = f"{config.MDNS_SERVICE_NAME}._http._tcp.local."
+        host_name = f"{config.MDNS_HOSTNAME}.local."
+        info = ServiceInfo(
+            type_="_http._tcp.local.",
+            name=service_name,
+            addresses=[socket.inet_aton(host_ip)],
+            port=port,
+            properties={"path": "/"},
+            server=host_name,
+        )
+        zeroconf = Zeroconf()
+        zeroconf.register_service(info)
+        _mdns_zeroconf = zeroconf
+        _mdns_service_info = info
+        atexit.register(stop_mdns_service)
+        logger.info("mDNS service registered as http://%s.local:%d", config.MDNS_HOSTNAME, port)
+        return True
+    except Exception as exc:
+        logger.warning("Failed to register mDNS service: %s", str(exc))
+        return False
+
+
+def stop_mdns_service() -> None:
+    """Unregister the mDNS service if it was started."""
+    global _mdns_zeroconf, _mdns_service_info
+
+    if _mdns_zeroconf is None or _mdns_service_info is None:
+        return
+
+    try:
+        _mdns_zeroconf.unregister_service(_mdns_service_info)
+        _mdns_zeroconf.close()
+    except Exception as exc:
+        logger.debug("Error stopping mDNS service: %s", str(exc))
+    finally:
+        _mdns_zeroconf = None
+        _mdns_service_info = None
 
 
 @app.route('/')
@@ -103,6 +177,7 @@ def stream():
                         'total_in': stats['total_in'],
                         'total_out': stats['total_out'],
                         'current_inside': stats['current_inside'],
+                        'last_reset_at': stats.get('last_reset_at'),
                         'camera_count': camera_count,
                         'connected_count': connected_count,
                         'timestamp': time.time(),
@@ -148,11 +223,17 @@ def api_stats():
 
     try:
         stats = state_manager.get_stats()
+        analytics = state_manager.get_analytics(interval_minutes=int(request.args.get('interval_minutes', 15)))
         
         result = {
             'total_in': stats['total_in'],
             'total_out': stats['total_out'],
             'current_inside': stats['current_inside'],
+            'last_reset_at': stats.get('last_reset_at'),
+            'interval_minutes': analytics.get('interval_minutes', 15),
+            'time_series': analytics.get('time_series', []),
+            'camera_summary': analytics.get('camera_summary', []),
+            'generated_at': datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
         }
 
         if camera_manager is not None:
@@ -163,6 +244,14 @@ def api_stats():
                 result['cameras'] = aggregated.get('cameras', [])
             except Exception as e:
                 logger.warning("Error getting camera stats: %s", str(e))
+
+        if camera_manager is not None and getattr(camera_manager, 'model', None) is not None:
+            try:
+                result['gpu'] = camera_manager.model.get_gpu_stats()
+            except Exception as e:
+                logger.warning("Error getting GPU stats: %s", str(e))
+
+        result['service_url'] = f"http://{config.MDNS_HOSTNAME}.local:{config.FLASK_PORT}"
 
         return jsonify(result), 200
 
@@ -333,6 +422,7 @@ def run_app(
         port: Port to bind to.
         debug: Debug mode flag.
     """
+    start_mdns_service(port)
     logger.info("Starting Flask server on %s:%d", host, port)
     app.run(
         host=host,

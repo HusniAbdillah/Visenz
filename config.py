@@ -28,7 +28,7 @@ CAMERAS = [
         "line_ratio": 0.5,  # 0.0 to 1.0 (50% of width for vertical, 50% of height for horizontal)
         "in_direction": "left_to_right",  # Options: 'left_to_right', 'right_to_left', 'top_to_bottom', 'bottom_to_top'
         "frame_skip": 3,  # Process every Nth frame for inference (1=every frame, 3=every 3rd)
-        "enabled": True,
+        "enabled": False,
     },
     # {
     #     "id": "Cam_Pintu_Samping",
@@ -79,6 +79,9 @@ MODEL_NAME = "yolov8n"  # Nano model for edge devices
 MODEL_TRACK_CLASS = 0  # 0 = person class in COCO dataset
 CONFIDENCE_THRESHOLD = 0.35
 IOU_THRESHOLD = 0.45
+STRICT_CUDA_ONLY = True
+INFERENCE_BATCH_SIZE = 3
+INFERENCE_BATCH_WAIT_SECONDS = 0.02
 
 # Tracking & State Machine
 TRACK_PERSISTENCE = 30  # Frames to keep track after detection lost
@@ -113,7 +116,14 @@ LOG_LEVEL = "INFO"
 LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 LOG_DIR = PROJECT_ROOT / "logs"
 LOG_DIR.mkdir(exist_ok=True)
+DATABASE_FILE = PROJECT_ROOT / "edge_vision_counter.db"
 
 # Application Behavior
 ENABLE_GRACEFUL_DEGRADATION = True  # Continue with available cameras if one fails
 HEALTH_CHECK_INTERVAL = 30  # Seconds between camera health checks
+
+# mDNS / Discovery
+MDNS_ENABLED = True
+MDNS_SERVICE_NAME = os.environ.get("COUNTER_MDNS_SERVICE_NAME", "counter-gww")
+MDNS_HOSTNAME = os.environ.get("COUNTER_MDNS_HOSTNAME", "counter-gww")
+

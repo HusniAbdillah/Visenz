@@ -10,6 +10,7 @@ import logging.handlers
 import signal
 import threading
 import atexit
+import time
 from typing import Optional
 
 import cv2
@@ -18,13 +19,38 @@ import config
 from core.detector import VisionModel
 from core.state_manager import StateManager
 from core.tracker_manager import CameraManager
-from web.app import run_app, set_camera_manager, set_state_manager
+from web.app import run_app, set_camera_manager, set_state_manager, stop_mdns_service
 
 logger = logging.getLogger(__name__)
 
 camera_manager: Optional[CameraManager] = None
 state_manager: Optional[StateManager] = None
 shutdown_in_progress: bool = False
+
+
+def _log_runtime_metrics(model: VisionModel, state: StateManager) -> None:
+    """Periodically log GPU and counting snapshots for long-running sessions."""
+    while not shutdown_in_progress:
+        try:
+            stats = state.get_stats()
+            gpu_stats = model.get_gpu_stats()
+            logger.info(
+                "Runtime snapshot | IN=%d OUT=%d INSIDE=%d | GPU util=%s%% mem=%s/%s MB queue=%s",
+                stats['total_in'],
+                stats['total_out'],
+                stats['current_inside'],
+                gpu_stats.get('utilization_percent'),
+                gpu_stats.get('memory_used_mb'),
+                gpu_stats.get('memory_total_mb'),
+                gpu_stats.get('batch_queue_depth'),
+            )
+        except Exception as exc:
+            logger.warning("Failed to log runtime metrics: %s", str(exc))
+
+        for _ in range(60):
+            if shutdown_in_progress:
+                return
+            time.sleep(1)
 
 
 def setup_logging() -> None:
@@ -87,6 +113,11 @@ def graceful_shutdown() -> None:
     except Exception as e:
         logger.error("Error destroying OpenCV windows: %s", str(e))
 
+    try:
+        stop_mdns_service()
+    except Exception as e:
+        logger.debug("Error stopping mDNS service: %s", str(e))
+
     logger.info("Edge Vision Counter V2 - Shutdown complete")
     logger.info("=" * 70)
 
@@ -148,6 +179,14 @@ def main() -> None:
         model = VisionModel()
         logger.info("VisionModel loaded. Inference device: %s", model.get_device())
 
+        metrics_thread = threading.Thread(
+            target=_log_runtime_metrics,
+            args=(model, state_manager),
+            name="RuntimeMetricsLogger",
+            daemon=True,
+        )
+        metrics_thread.start()
+
         logger.info("Initializing CameraManager...")
         camera_manager = CameraManager(model=model, state_manager=state_manager)
 
@@ -185,6 +224,7 @@ def main() -> None:
         logger.info("=" * 70)
         logger.info("Starting Flask web server...")
         logger.info("Dashboard URL: http://localhost:%d", config.FLASK_PORT)
+        logger.info("Dashboard mDNS URL: http://%s.local:%d", config.MDNS_HOSTNAME, config.FLASK_PORT)
         logger.info("Admin APIs:")
         logger.info("  - POST /api/set_count : Manual calibration")
         logger.info("  - POST /api/reset     : Reset all counts")
