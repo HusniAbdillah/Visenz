@@ -153,3 +153,5 @@ logs/
 temp/
 cache/
 .cache/
+
+*.db

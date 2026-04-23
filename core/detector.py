@@ -53,6 +53,7 @@ class VisionModel:
         """Initialize the vision model with hardware acceleration detection."""
         self.model: Optional[YOLO] = None
         self.device: str = "cpu"
+        self._predict_device: Optional[str] = "cpu"
         self.inference_size = config.CAMERA_INFERENCE_SIZE
         self._batch_queue: "queue.Queue[_InferenceRequest]" = queue.Queue()
         self._batch_worker: Optional[threading.Thread] = None
@@ -63,41 +64,108 @@ class VisionModel:
 
     def _initialize_model(self) -> None:
         """
-        Load YOLOv8 model with CUDA-only acceleration.
+        Load YOLOv8 model using configured backend preference.
+
+        Priority for "auto" backend:
+        1) CUDA
+        2) OpenVINO (Intel)
+        3) CPU fallback
 
         Raises:
-            RuntimeError: If CUDA cannot be initialized.
+            RuntimeError: If all selected backend options fail.
         """
         model_path = f"{config.MODEL_NAME}.pt"
+        backend = str(getattr(config, "INFERENCE_BACKEND", "auto")).strip().lower()
+
+        logger.info("Initializing YOLOv8 backend='%s' model='%s'", backend, model_path)
+
+        errors = []
+        backend_order = [backend]
+        if backend == "auto":
+            backend_order = ["cuda", "openvino", "cpu"]
+
+        for candidate in backend_order:
+            try:
+                if candidate == "cuda":
+                    self._initialize_cuda(model_path)
+                    return
+                if candidate == "openvino":
+                    self._initialize_openvino(model_path)
+                    return
+                if candidate == "cpu":
+                    self._initialize_cpu(model_path)
+                    return
+                raise RuntimeError(f"Unsupported INFERENCE_BACKEND='{candidate}'")
+            except Exception as e:
+                errors.append(f"{candidate}: {e}")
+                logger.warning("Backend '%s' initialization failed: %s", candidate, str(e))
+
+        raise RuntimeError("Model initialization failed for all candidates: " + " | ".join(errors))
+
+    def _initialize_cuda(self, model_path: str) -> None:
+        if not torch.cuda.is_available():
+            raise RuntimeError("torch.cuda.is_available() returned False")
+
+        if hasattr(torch.backends, "cudnn"):
+            torch.backends.cudnn.benchmark = True
 
         try:
-            logger.info("Starting CUDA-only YOLOv8 model initialization")
+            torch.set_float32_matmul_precision("high")
+        except Exception:
+            pass
 
-            if not torch.cuda.is_available():
-                raise RuntimeError("CUDA is required but torch.cuda.is_available() returned False")
+        self.model = YOLO(model_path, task="detect")
+        self.device = "cuda:0"
+        self._predict_device = "cuda:0"
+        self._running = True
+        self._batch_worker = threading.Thread(
+            target=self._batch_inference_loop,
+            name="VisionModelBatchWorker",
+            daemon=True,
+        )
+        self._batch_worker.start()
+        logger.info("Model initialized on CUDA (device: cuda:0)")
 
-            if hasattr(torch.backends, "cudnn"):
-                torch.backends.cudnn.benchmark = True
+    def _initialize_openvino(self, model_path: str) -> None:
+        model_stem = config.MODEL_NAME
+        configured_xml = getattr(config, "OPENVINO_XML_PATH", None)
+        if configured_xml:
+            ov_xml_path = Path(configured_xml)
+        else:
+            ov_xml_path = config.PROJECT_ROOT / f"{model_stem}_openvino_model" / f"{model_stem}.xml"
 
-            try:
-                torch.set_float32_matmul_precision("high")
-            except Exception:
-                pass
+        if not ov_xml_path.exists():
+            auto_export = bool(getattr(config, "OPENVINO_AUTO_EXPORT", True))
+            if not auto_export:
+                raise RuntimeError(f"OpenVINO model not found: {ov_xml_path}")
 
-            self.model = YOLO(model_path)
-            self.device = "cuda:0"
-            self._running = True
-            self._batch_worker = threading.Thread(
-                target=self._batch_inference_loop,
-                name="VisionModelBatchWorker",
-                daemon=True,
-            )
-            self._batch_worker.start()
-            logger.info("Model successfully loaded on NVIDIA GPU (device: cuda:0)")
+            logger.info("OpenVINO IR not found. Exporting from PT model on CPU...")
+            base_model = YOLO(model_path, task="detect")
+            self._export_to_openvino(base_model, model_stem)
 
-        except Exception as e:
-            logger.error("Failed to initialize CUDA-only model: %s", str(e))
-            raise RuntimeError(f"Model initialization failed: {str(e)}")
+        if not ov_xml_path.exists():
+            raise RuntimeError(f"OpenVINO export did not produce XML: {ov_xml_path}")
+
+        # Ultralytics OpenVINO backend expects the exported directory path
+        # (e.g. yolov8n_openvino_model), not only the .xml file path.
+        ov_model_dir = ov_xml_path.parent if ov_xml_path.suffix.lower() == ".xml" else ov_xml_path
+        if not ov_model_dir.exists() or not ov_model_dir.is_dir():
+            raise RuntimeError(f"OpenVINO model directory not found: {ov_model_dir}")
+
+        self.model = YOLO(str(ov_model_dir), task="detect")
+        target = str(getattr(config, "OPENVINO_DEVICE", "GPU")).strip().upper()
+        self.device = f"openvino:{target.lower()}"
+        # Keep runtime predictable across Ultralytics/OpenVINO versions.
+        self._predict_device = "cpu"
+        self._running = False
+        logger.info("Model initialized on OpenVINO (target=%s, dir=%s)", target, ov_model_dir)
+
+    def _initialize_cpu(self, model_path: str) -> None:
+        self.model = YOLO(model_path, task="detect")
+        self.device = "cpu"
+        self._predict_device = "cpu"
+        self._running = False
+        logger.info("Model initialized on CPU")
 
     def _resize_frame_for_inference(self, frame: np.ndarray) -> Tuple[np.ndarray, Tuple[float, float]]:
         """
@@ -204,8 +272,8 @@ class VisionModel:
                     conf=conf,
                     iou=iou,
                     imgsz=self.inference_size,
-                    device=self.device,
-                    half=True,
+                    device=self._predict_device,
+                    half=bool(getattr(config, "CUDA_HALF", True) and self.device.startswith("cuda")),
                     verbose=False,
                 )
 
@@ -229,8 +297,8 @@ class VisionModel:
             conf=conf,
             iou=iou,
             imgsz=self.inference_size,
-            device=self.device,
-            half=True,
+            device=self._predict_device,
+            half=bool(getattr(config, "CUDA_HALF", True) and self.device.startswith("cuda")),
             verbose=False,
         )
 
@@ -322,6 +390,20 @@ class VisionModel:
             stats["memory_used_mb"] = stats["memory_allocated_mb"]
 
         return stats
+
+    def _export_to_openvino(self, model: YOLO, model_stem: str) -> None:
+        """
+        Export PT model to OpenVINO IR while forcing CPU export device.
+
+        For some CUDA environments, Ultralytics export raises
+        `Invalid CUDA device` unless export is pinned to CPU.
+        """
+        export_kwargs = {
+            "format": "openvino",
+            "device": "cpu",
+        }
+        logger.info("Exporting model '%s' to OpenVINO with args=%s", model_stem, export_kwargs)
+        model.export(**export_kwargs)
 
 
 def _to_numpy(x: Any) -> np.ndarray:

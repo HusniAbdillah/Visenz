@@ -13,11 +13,15 @@ import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
+from uuid import uuid4
+
+import pytz
 
 import config
 from core.analytics_db import AnalyticsDB
 
 logger = logging.getLogger(__name__)
+WIB_TZ = pytz.timezone("Asia/Jakarta")
 
 
 class StateManager:
@@ -30,12 +34,17 @@ class StateManager:
         self._lock: threading.Lock = threading.Lock()
         self._total_in: int = 0
         self._total_out: int = 0
-        self._last_reset_at: str = self._utc_now()
+        self._session_id: str = self._new_session_id()
+        self._last_reset_at: str = self._wib_now()
         self._load_state()
 
     @staticmethod
-    def _utc_now() -> str:
-        return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    def _wib_now() -> str:
+        return datetime.now(WIB_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+    @staticmethod
+    def _new_session_id() -> str:
+        return datetime.now(WIB_TZ).strftime("%Y%m%d%H%M%S") + "-" + uuid4().hex[:8]
 
     def _load_state(self) -> None:
         """
@@ -47,12 +56,14 @@ class StateManager:
                 db_state = self._analytics_db.load_state()
                 self._total_in = int(db_state.get("total_in", 0))
                 self._total_out = int(db_state.get("total_out", 0))
-                self._last_reset_at = str(db_state.get("last_reset_at", self._utc_now()))
+                self._session_id = str(db_state.get("session_id", self._new_session_id()))
+                self._last_reset_at = str(db_state.get("last_reset_at", self._wib_now()))
                 logger.info(
-                    "State loaded from SQLite %s: total_in=%d, total_out=%d",
+                    "State loaded from SQLite %s: total_in=%d, total_out=%d, session_id=%s",
                     self._db_path,
                     self._total_in,
                     self._total_out,
+                    self._session_id,
                 )
                 self._save_state()
                 return
@@ -65,7 +76,8 @@ class StateManager:
                         data = json.load(f)
                         self._total_in = int(data.get("total_in", 0))
                         self._total_out = int(data.get("total_out", 0))
-                        self._last_reset_at = str(data.get("last_reset_at", self._utc_now()))
+                        self._session_id = str(data.get("session_id", self._new_session_id()))
+                        self._last_reset_at = str(data.get("last_reset_at", self._wib_now()))
                         logger.info(
                             "State loaded from %s: total_in=%d, total_out=%d",
                             self._state_path,
@@ -76,18 +88,21 @@ class StateManager:
                     logger.info("State file not found at %s. Starting with zeros.", self._state_path)
                     self._total_in = 0
                     self._total_out = 0
-                    self._last_reset_at = self._utc_now()
-                self._analytics_db.save_state(self._total_in, self._total_out, self._last_reset_at)
+                    self._session_id = self._new_session_id()
+                    self._last_reset_at = self._wib_now()
+                self._analytics_db.save_state(self._total_in, self._total_out, self._session_id, self._last_reset_at)
             except (json.JSONDecodeError, ValueError, TypeError) as e:
                 logger.warning("Failed to parse state file %s: %s. Starting with zeros.", self._state_path, str(e))
                 self._total_in = 0
                 self._total_out = 0
-                self._last_reset_at = self._utc_now()
+                self._session_id = self._new_session_id()
+                self._last_reset_at = self._wib_now()
             except Exception as e:
                 logger.error("Unexpected error loading state from %s: %s. Starting with zeros.", self._state_path, str(e))
                 self._total_in = 0
                 self._total_out = 0
-                self._last_reset_at = self._utc_now()
+                self._session_id = self._new_session_id()
+                self._last_reset_at = self._wib_now()
 
     def _save_state(self) -> None:
         """
@@ -98,16 +113,18 @@ class StateManager:
             data = {
                 "total_in": self._total_in,
                 "total_out": self._total_out,
+                "session_id": self._session_id,
                 "last_reset_at": self._last_reset_at,
             }
             with open(self._state_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
-            self._analytics_db.save_state(self._total_in, self._total_out, self._last_reset_at)
+            self._analytics_db.save_state(self._total_in, self._total_out, self._session_id, self._last_reset_at)
             logger.debug(
-                "State saved to %s: total_in=%d, total_out=%d",
+                "State saved to %s: total_in=%d, total_out=%d, session_id=%s",
                 self._state_path,
                 self._total_in,
                 self._total_out,
+                self._session_id,
             )
         except Exception as e:
             logger.error("Failed to save state to %s: %s", self._state_path, str(e))
@@ -145,10 +162,12 @@ class StateManager:
         if count <= 0:
             return
 
-        timestamp = timestamp or self._utc_now()
-        events = [(timestamp, camera_id, direction) for _ in range(int(count))]
+        timestamp_wib = timestamp or self._wib_now()
 
         with self._lock:
+            current_session_id = self._session_id
+            events = [(timestamp_wib, camera_id, direction, current_session_id) for _ in range(int(count))]
+
             if direction == "IN":
                 self._total_in += int(count)
             else:
@@ -158,10 +177,11 @@ class StateManager:
             self._save_state()
 
             logger.info(
-                "Recorded %d %s crossing(s) for camera '%s'. Totals: in=%d, out=%d",
+                "Recorded %d %s crossing(s) for camera '%s' in session '%s'. Totals: in=%d, out=%d",
                 count,
                 direction,
                 camera_id,
+                current_session_id,
                 self._total_in,
                 self._total_out,
             )
@@ -208,18 +228,33 @@ class StateManager:
                 "total_in": self._total_in,
                 "total_out": self._total_out,
                 "current_inside": self._total_in - self._total_out,
+                "session_id": self._session_id,
                 "last_reset_at": self._last_reset_at,
+                "timezone": "Asia/Jakarta",
             }
 
     def get_analytics(self, interval_minutes: int = 15) -> Dict[str, Any]:
         """Return time-series and per-camera aggregates for the current session."""
         with self._lock:
             start_at = self._last_reset_at
+            session_id = self._session_id
         return {
             "interval_minutes": int(interval_minutes),
             "start_at": start_at,
-            "time_series": self._analytics_db.fetch_time_series(start_at, interval_minutes=interval_minutes),
-            "camera_summary": self._analytics_db.fetch_camera_summary(start_at),
+            "session_id": session_id,
+            "timezone": "Asia/Jakarta",
+            "time_series": self._analytics_db.fetch_time_series(start_at, session_id=session_id, interval_minutes=interval_minutes),
+            "camera_summary": self._analytics_db.fetch_camera_summary(start_at, session_id=session_id),
+        }
+
+    def get_event_logs(self, only_current_session: bool = True) -> Dict[str, Any]:
+        with self._lock:
+            session_id = self._session_id
+        rows = self._analytics_db.fetch_logs(session_id=session_id if only_current_session else None)
+        return {
+            "session_id": session_id,
+            "timezone": "Asia/Jakarta",
+            "rows": rows,
         }
 
     def set_current_inside(self, target: int) -> None:
@@ -244,14 +279,15 @@ class StateManager:
 
     def reset(self) -> None:
         """
-        Reset all counts to zero and persist state.
+        Start a new active session and reset live counters only.
         """
         with self._lock:
             self._total_in = 0
             self._total_out = 0
-            self._last_reset_at = self._utc_now()
+            self._session_id = self._new_session_id()
+            self._last_reset_at = self._wib_now()
             self._save_state()
-            logger.info("State reset to zero. total_in=0, total_out=0")
+            logger.info("State reset for new session '%s'. total_in=0, total_out=0", self._session_id)
 
     def bulk_update(self, new_in: int, new_out: int, camera_id: str = "legacy", timestamp: Optional[str] = None) -> None:
         """

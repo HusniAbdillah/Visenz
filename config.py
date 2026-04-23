@@ -14,22 +14,22 @@ PROJECT_ROOT = Path(__file__).parent
 CAMERAS = [
     {
         "id": "Cam_Pintu_Utama",
-        "url": "5",
+        "url": "0",
         "orientation": "vertical",  # 'vertical' or 'horizontal'
         "line_ratio": 0.5,  # 0.0 to 1.0 (50% of width for vertical, 50% of height for horizontal)
         "in_direction": "left_to_right",  # Options: 'left_to_right', 'right_to_left', 'top_to_bottom', 'bottom_to_top'
         "frame_skip": 3,  # Process every Nth frame for inference (1=every frame, 3=every 3rd)
         "enabled": True,
     },
-    {
-        "id": "Cam_Pintu_Belakang",
-        "url": "6",
-        "orientation": "vertical",  # 'vertical' or 'horizontal'
-        "line_ratio": 0.5,  # 0.0 to 1.0 (50% of width for vertical, 50% of height for horizontal)
-        "in_direction": "right_to_left",  # Options: 'left_to_right', 'right_to_left', 'top_to_bottom', 'bottom_to_top'
-        "frame_skip": 3,  # Process every Nth frame for inference (1=every frame, 3=every 3rd)
-        "enabled": False,
-    },
+    # {
+    #     "id": "Cam_Pintu_Belakang",
+    #     "url": "6",
+    #     "orientation": "vertical",  # 'vertical' or 'horizontal'
+    #     "line_ratio": 0.5,  # 0.0 to 1.0 (50% of width for vertical, 50% of height for horizontal)
+    #     "in_direction": "right_to_left",  # Options: 'left_to_right', 'right_to_left', 'top_to_bottom', 'bottom_to_top'
+    #     "frame_skip": 3,  # Process every Nth frame for inference (1=every frame, 3=every 3rd)
+    #     "enabled": False,
+    # },
     # {
     #     "id": "Cam_Pintu_Samping",
     #     "url": "0",
@@ -79,7 +79,14 @@ MODEL_NAME = "yolov8n"  # Nano model for edge devices
 MODEL_TRACK_CLASS = 0  # 0 = person class in COCO dataset
 CONFIDENCE_THRESHOLD = 0.35
 IOU_THRESHOLD = 0.45
-STRICT_CUDA_ONLY = True
+
+# Inference backend selection:
+# - "auto"     : CUDA -> OpenVINO -> CPU fallback
+# - "cuda"     : NVIDIA GPU only
+# - "openvino" : Intel OpenVINO only
+# - "cpu"      : CPU only
+INFERENCE_BACKEND = os.environ.get("INFERENCE_BACKEND", "openvino").lower()
+CUDA_HALF = True
 INFERENCE_BATCH_SIZE = 3
 INFERENCE_BATCH_WAIT_SECONDS = 0.02
 
@@ -87,6 +94,10 @@ INFERENCE_BATCH_WAIT_SECONDS = 0.02
 TRACK_PERSISTENCE = 30  # Frames to keep track after detection lost
 LINE_CROSSING_THRESHOLD = 10  # Minimum pixels to cross the line to count
 DETECTION_MIN_CONSECUTIVE = 2  # Min frames to track before counting
+LINE_BUFFER_ZONE_PX = 20  # Deadzone around counting line to avoid jitter double-count
+LINE_CROSSING_COOLDOWN_FRAMES = 18  # Anti-loitering cooldown per ID after a valid crossing
+LINE_MIN_MOTION_PX = 3.0  # Minimum directional motion to classify IN/OUT
+TRACK_STATE_STALE_FRAMES = 180  # Cleanup window for inactive tracker IDs
 
 # Threading & Performance Optimization
 MAX_CONCURRENT_INFERENCE = 2  # Max parallel inference threads
@@ -99,12 +110,18 @@ FLASK_HOST = "0.0.0.0"
 FLASK_PORT = 5000
 FLASK_DEBUG = False
 SSE_UPDATE_INTERVAL = 0.5  # Seconds
+ADMIN_RESET_PASSWORD = os.environ.get("ADMIN_RESET_PASSWORD", "admin")
 
 # OpenVINO Configuration (Intel Iris Xe Acceleration)
 # Updated to OpenVINO 2024.6.0 - export fixed, GPU acceleration enabled
-USE_OPENVINO = False
-# OPENVINO_DEVICE = "GPU"  # 'GPU' for iGPU (Intel Iris Xe), 'CPU' as fallback
-# OPENVINO_COMPILE_OPTIMIZATION = "LATENCY"  # 'LATENCY' or 'THROUGHPUT'
+USE_OPENVINO = True
+OPENVINO_DEVICE = "GPU"  # 'GPU' for iGPU (Intel Iris Xe), 'CPU' as fallback
+OPENVINO_COMPILE_OPTIMIZATION = "LATENCY"  # 'LATENCY' or 'THROUGHPUT'
+OPENVINO_AUTO_EXPORT = True
+OPENVINO_XML_PATH = os.environ.get(
+    "OPENVINO_XML_PATH",
+    str(PROJECT_ROOT / f"{MODEL_NAME}_openvino_model" / f"{MODEL_NAME}.xml"),
+)
 
 # Visualization & Debug
 ENABLE_DEBUG_DISPLAY = True  # Show cv2.imshow() with bboxes, lines, IDs

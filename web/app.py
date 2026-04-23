@@ -5,19 +5,23 @@ Multi-camera dashboard support with real-time SSE updates.
 """
 
 import atexit
+import csv
 import json
 import logging
 import importlib
+import io
 import socket
 import time
 from datetime import datetime
 from typing import Iterator, Optional
 from flask import Flask, render_template, Response, jsonify, request
+import pytz
 
 import config
 from core.state_manager import StateManager
 
 logger = logging.getLogger(__name__)
+WIB_TZ = pytz.timezone("Asia/Jakarta")
 
 app = Flask(__name__, template_folder='templates')
 app.config['JSON_SORT_KEYS'] = False
@@ -26,6 +30,10 @@ camera_manager = None
 state_manager: Optional[StateManager] = None
 _mdns_zeroconf = None
 _mdns_service_info = None
+
+
+def _wib_now() -> str:
+    return datetime.now(WIB_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def set_camera_manager(manager) -> None:
@@ -177,6 +185,8 @@ def stream():
                         'total_in': stats['total_in'],
                         'total_out': stats['total_out'],
                         'current_inside': stats['current_inside'],
+                        'session_id': stats.get('session_id'),
+                        'timezone': stats.get('timezone', 'Asia/Jakarta'),
                         'last_reset_at': stats.get('last_reset_at'),
                         'camera_count': camera_count,
                         'connected_count': connected_count,
@@ -229,11 +239,13 @@ def api_stats():
             'total_in': stats['total_in'],
             'total_out': stats['total_out'],
             'current_inside': stats['current_inside'],
+            'session_id': stats.get('session_id'),
+            'timezone': stats.get('timezone', 'Asia/Jakarta'),
             'last_reset_at': stats.get('last_reset_at'),
             'interval_minutes': analytics.get('interval_minutes', 15),
             'time_series': analytics.get('time_series', []),
             'camera_summary': analytics.get('camera_summary', []),
-            'generated_at': datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
+            'generated_at': _wib_now(),
         }
 
         if camera_manager is not None:
@@ -351,6 +363,13 @@ def reset():
         return jsonify({'error': 'state_manager not initialized'}), 500
 
     try:
+        data = request.get_json(silent=True) or {}
+        provided_password = str(data.get('password', ''))
+        reset_password = str(getattr(config, 'ADMIN_RESET_PASSWORD', 'admin'))
+
+        if provided_password != reset_password:
+            return jsonify({'error': 'Invalid password'}), 403
+
         state_manager.reset()
         
         logger.info("All counts reset via API")
@@ -363,6 +382,47 @@ def reset():
 
     except Exception as e:
         logger.error("Error in reset API: %s", str(e))
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/export')
+def export_logs():
+    """Export SQLite event logs as CSV for active session by default."""
+    if state_manager is None:
+        return jsonify({'error': 'state_manager not initialized'}), 500
+
+    try:
+        export_all = str(request.args.get('all', '0')).lower() in {'1', 'true', 'yes'}
+        payload = state_manager.get_event_logs(only_current_session=not export_all)
+        session_id = payload.get('session_id', 'unknown')
+        rows = payload.get('rows', [])
+
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(['id', 'timestamp_wib', 'camera_id', 'direction', 'session_id'])
+        for row in rows:
+            writer.writerow([
+                row.get('id'),
+                row.get('timestamp_wib'),
+                row.get('camera_id'),
+                row.get('direction'),
+                row.get('session_id'),
+            ])
+
+        csv_text = output.getvalue()
+        output.close()
+        filename = f"edge_vision_logs_{session_id}.csv"
+
+        return Response(
+            csv_text,
+            mimetype='text/csv',
+            headers={
+                'Content-Disposition': f'attachment; filename={filename}',
+                'Cache-Control': 'no-store',
+            },
+        )
+    except Exception as e:
+        logger.error('Error exporting CSV: %s', str(e))
         return jsonify({'error': str(e)}), 500
 
 

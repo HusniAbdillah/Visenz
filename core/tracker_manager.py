@@ -7,6 +7,7 @@ Strictly decoupled from video capture - takes ThreadedVideoReader and StateManag
 import logging
 import threading
 import time
+from collections import deque
 from typing import Dict, List, Optional, Tuple, Any
 
 import cv2
@@ -77,6 +78,16 @@ class SupervisionTracker:
         self._local_out_count: int = 0
         self._last_line_in: int = 0
         self._last_line_out: int = 0
+        self._line_start_np: Optional[np.ndarray] = None
+        self._line_end_np: Optional[np.ndarray] = None
+        self._line_vec: Optional[np.ndarray] = None
+
+        self._crossing_deadzone_px: float = float(getattr(config, "LINE_BUFFER_ZONE_PX", 20.0))
+        self._crossing_cooldown_frames: int = int(getattr(config, "LINE_CROSSING_COOLDOWN_FRAMES", 18))
+        self._min_track_age_frames: int = int(getattr(config, "DETECTION_MIN_CONSECUTIVE", 2))
+        self._min_motion_px: float = float(getattr(config, "LINE_MIN_MOTION_PX", 3.0))
+        self._track_stale_frames: int = int(getattr(config, "TRACK_STATE_STALE_FRAMES", 180))
+        self._track_states: Dict[int, Dict[str, Any]] = {}
 
         self._initialized: bool = False
 
@@ -137,6 +148,9 @@ class SupervisionTracker:
         )
 
         line_start, line_end = self._calculate_line_coordinates(frame_w, frame_h)
+        self._line_start_np = np.array([float(line_start.x), float(line_start.y)], dtype=np.float32)
+        self._line_end_np = np.array([float(line_end.x), float(line_end.y)], dtype=np.float32)
+        self._line_vec = self._line_end_np - self._line_start_np
         logger.info(
             "Camera '%s': Line coordinates: start=%s, end=%s",
             self.camera_id,
@@ -152,8 +166,8 @@ class SupervisionTracker:
 
         self._byte_tracker = sv.ByteTrack(
             track_activation_threshold=config.CONFIDENCE_THRESHOLD,
-            lost_track_buffer=90,
-            minimum_matching_threshold=config.IOU_THRESHOLD,
+            lost_track_buffer=max(int(getattr(config, "TRACK_PERSISTENCE", 30)) * 6, 180),
+            minimum_matching_threshold=max(0.65, float(config.IOU_THRESHOLD)),
             frame_rate=config.CAMERA_FPS,
         )
 
@@ -221,6 +235,102 @@ class SupervisionTracker:
                 end = sv.Point(x=frame_w, y=y_pos)
 
         return start, end
+
+    def _line_side_value(self, point: np.ndarray) -> float:
+        if self._line_start_np is None or self._line_vec is None:
+            return 0.0
+        rel = point - self._line_start_np
+        return float((self._line_vec[0] * rel[1]) - (self._line_vec[1] * rel[0]))
+
+    def _distance_to_line(self, side_value: float) -> float:
+        if self._line_vec is None:
+            return 0.0
+        denom = float(np.linalg.norm(self._line_vec))
+        if denom <= 1e-6:
+            return 0.0
+        return abs(side_value) / denom
+
+    def _is_in_direction(self, motion: np.ndarray) -> bool:
+        if self.in_direction == "left_to_right":
+            return float(motion[0]) > self._min_motion_px
+        if self.in_direction == "right_to_left":
+            return float(motion[0]) < -self._min_motion_px
+        if self.in_direction == "top_to_bottom":
+            return float(motion[1]) > self._min_motion_px
+        if self.in_direction == "bottom_to_top":
+            return float(motion[1]) < -self._min_motion_px
+        return False
+
+    def _update_crossing_state(self, detections: sv.Detections) -> Tuple[int, int]:
+        if detections.tracker_id is None or self._line_vec is None:
+            return 0, 0
+
+        new_in = 0
+        new_out = 0
+        active_ids = set()
+
+        for idx, tracker_id in enumerate(detections.tracker_id):
+            if tracker_id is None:
+                continue
+
+            track_id = int(tracker_id)
+            active_ids.add(track_id)
+            x1, y1, x2, y2 = detections.xyxy[idx]
+            anchor = np.array([float((x1 + x2) * 0.5), float(y2)], dtype=np.float32)
+
+            state = self._track_states.setdefault(
+                track_id,
+                {
+                    "age": 0,
+                    "last_point": anchor,
+                    "last_stable_side": None,
+                    "last_count_frame": -100000,
+                    "last_seen_frame": self._frame_count,
+                    "history": deque(maxlen=12),
+                },
+            )
+
+            state["age"] += 1
+            state["last_seen_frame"] = self._frame_count
+            state["history"].append((float(anchor[0]), float(anchor[1])))
+
+            side_value = self._line_side_value(anchor)
+            line_dist = self._distance_to_line(side_value)
+            stable_sign = 1 if side_value > 0 else -1
+
+            prev_point = np.array(state["last_point"], dtype=np.float32)
+            motion = anchor - prev_point
+            prev_stable_side = state["last_stable_side"]
+
+            if line_dist > self._crossing_deadzone_px:
+                state["last_stable_side"] = stable_sign
+
+            can_count = (
+                prev_stable_side is not None
+                and line_dist > self._crossing_deadzone_px
+                and prev_stable_side != stable_sign
+                and state["age"] >= self._min_track_age_frames
+                and (self._frame_count - int(state["last_count_frame"])) >= self._crossing_cooldown_frames
+            )
+
+            if can_count:
+                if self._is_in_direction(motion):
+                    new_in += 1
+                elif np.linalg.norm(motion) >= self._min_motion_px:
+                    new_out += 1
+                state["last_count_frame"] = self._frame_count
+
+            state["last_point"] = anchor
+
+        stale_ids = [
+            tid
+            for tid, state in self._track_states.items()
+            if tid not in active_ids and (self._frame_count - int(state.get("last_seen_frame", 0))) > self._track_stale_frames
+        ]
+        for tid in stale_ids:
+            self._track_states.pop(tid, None)
+
+        return new_in, new_out
 
     def _determine_in_out_direction(self) -> Tuple[str, str]:
         """
@@ -336,22 +446,7 @@ class SupervisionTracker:
         else:
             detections = sv.Detections.empty()
 
-        crossed_in, crossed_out = self._line_zone.trigger(detections=detections)
-
-        current_line_in = self._line_zone.in_count
-        current_line_out = self._line_zone.out_count
-
-        in_attr, out_attr = self._determine_in_out_direction()
-        
-        if in_attr == "in_count":
-            actual_in = current_line_in
-            actual_out = current_line_out
-        else:
-            actual_in = current_line_out
-            actual_out = current_line_in
-
-        new_in = actual_in - self._local_in_count
-        new_out = actual_out - self._local_out_count
+        new_in, new_out = self._update_crossing_state(detections)
 
         if new_in > 0 or new_out > 0:
             if self.state_manager is not None:
@@ -367,15 +462,15 @@ class SupervisionTracker:
                         direction="OUT",
                         count=new_out,
                     )
-            self._local_in_count = actual_in
-            self._local_out_count = actual_out
+            self._local_in_count += new_in
+            self._local_out_count += new_out
             logger.info(
-                "Camera '%s': Line crossing - IN: +%d (total: %d), OUT: +%d (total: %d)",
+                "Camera '%s': Vector crossing - IN: +%d (total: %d), OUT: +%d (total: %d)",
                 self.camera_id,
                 new_in,
-                actual_in,
+                self._local_in_count,
                 new_out,
-                actual_out
+                self._local_out_count,
             )
 
         annotated_frame = frame.copy()
