@@ -282,13 +282,18 @@ class SupervisionTracker:
         """
         if len(detections) == 0:
             return detections
-        
+
         edge_margin = int(getattr(config, "EDGE_ZONE_MARGIN_PX", 80))
         confidence_floor = float(getattr(config, "EDGE_OCCLUSION_CONFIDENCE_FLOOR", 0.20))
         confidence_boost = float(getattr(config, "EDGE_OCCLUSION_CONFIDENCE_BOOST", 0.10))
-        
-        xyxy = detections.xyxy.copy()
-        confidence = detections.confidence.copy()
+
+        # Be defensive: detections.confidence may be None or not a numpy array
+        xyxy = np.array(detections.xyxy, copy=True)
+        conf_attr = getattr(detections, 'confidence', None)
+        if conf_attr is None:
+            # Nothing to boost
+            return detections
+        confidence = np.array(conf_attr, copy=True)
         
         for i, (x1, y1, x2, y2) in enumerate(xyxy):
             # Check if bbox is at frame edge
@@ -310,16 +315,29 @@ class SupervisionTracker:
                 boost_factor = confidence_boost * (1.5 - visibility_ratio)
                 new_conf = min(0.95, confidence[i] + boost_factor)
                 confidence[i] = new_conf
-                
-                logger.debug(
-                    "Camera '%s': Boosted edge detection conf: %.2f → %.2f (visibility: %.1f%%)",
-                    self.camera_id,
-                    confidence[i] - boost_factor,
-                    new_conf,
-                    visibility_ratio * 100
-                )
+
+                try:
+                    logger.debug(
+                        "Camera '%s': Boosted edge detection conf: %.2f → %.2f (visibility: %.1f%%)",
+                        self.camera_id,
+                        float(confidence[i] - boost_factor),
+                        float(new_conf),
+                        float(visibility_ratio * 100),
+                    )
+                except Exception:
+                    # Ignore logging formatting errors
+                    pass
         
-        detections.confidence = confidence
+        # Assign back the boosted confidences
+        try:
+            detections.confidence = confidence
+        except Exception:
+            # If assignment fails, construct a new Detections object preserving tracker_id/class_id
+            new_det = sv.Detections(xyxy=xyxy, confidence=confidence, class_id=getattr(detections, 'class_id', None))
+            if getattr(detections, 'tracker_id', None) is not None:
+                new_det.tracker_id = np.array(getattr(detections, 'tracker_id'))
+            return new_det
+
         return detections
 
     def _validate_crossing_with_motion(
@@ -355,57 +373,93 @@ class SupervisionTracker:
         
         # Secondary: Check momentum-based crossings for re-emerging tracks
         motion_extrapolation = bool(getattr(config, "MOTION_EXTRAPOLATION_ENABLED", True))
-        
-        if motion_extrapolation and hasattr(self._byte_tracker, 'tracked_tracks'):
+
+        if motion_extrapolation:
+            # ByteTrack internal container name may vary; try common attributes
+            track_container = getattr(self._byte_tracker, 'tracked_tracks', None) or getattr(self._byte_tracker, 'tracks', None) or []
             reacq_distance = int(getattr(config, "LOST_TRACK_REACQ_DISTANCE_PX", 150))
-            
-            for track in self._byte_tracker.tracked_tracks:
-                # Check for recently re-acquired tracks (time_since_update == 0)
-                if track.time_since_update == 0 and hasattr(track, 'kalman_filter'):
-                    kalman_mean = track.mean if hasattr(track, 'mean') else None
-                    
-                    if kalman_mean is not None and len(kalman_mean) >= 2:
-                        # Current position
-                        curr_x, curr_y = kalman_mean[0], kalman_mean[1]
-                        
-                        # Previous position (from last confirmation)
-                        if hasattr(track, 'hits') and track.hits >= 2:
-                            # Safe to use history
-                            if hasattr(track, '_last_pos'):
-                                prev_x, prev_y = track._last_pos
-                                
-                                # Check if motion crosses line
-                                line_start = line_zone.start
-                                line_end = line_zone.end
-                                
-                                # Segment from prev to curr
-                                crosses = self._segment_intersects_line(
-                                    (prev_x, prev_y),
-                                    (curr_x, curr_y),
-                                    (line_start.x, line_start.y),
-                                    (line_end.x, line_end.y),
-                                )
-                                
-                                if crosses:
-                                    direction = self._determine_motion_direction(
-                                        (prev_x, prev_y),
-                                        (curr_x, curr_y),
-                                    )
-                                    
-                                    if direction == "in":
-                                        in_count += 1
-                                    else:
-                                        out_count += 1
-                                    
-                                    logger.info(
-                                        "Camera '%s': Motion extrapolation crossing detected - "
-                                        "Track %d: %s (pos: %.0f,%.0f)",
-                                        self.camera_id,
-                                        track.track_id,
-                                        direction,
-                                        curr_x,
-                                        curr_y
-                                    )
+
+            for track in track_container:
+                try:
+                    time_since_update = getattr(track, 'time_since_update', None)
+                    # Consider recently re-acquired tracks (time_since_update == 0 or small)
+                    if time_since_update is None or time_since_update > 3:
+                        continue
+
+                    # Try to get previous and current positions from common attributes
+                    # Many STrack-like objects expose .mean or .tlwh or a history list
+                    if hasattr(track, 'mean') and track.mean is not None:
+                        mean = getattr(track, 'mean')
+                        # mean may be a length-4 vector [cx, cy, w, h] or similar
+                        if len(mean) >= 2:
+                            curr_x, curr_y = float(mean[0]), float(mean[1])
+                        else:
+                            continue
+                    elif hasattr(track, 'tlbr') and track.tlbr is not None:
+                        tlbr = getattr(track, 'tlbr')
+                        curr_x = float((tlbr[0] + tlbr[2]) / 2.0)
+                        curr_y = float((tlbr[1] + tlbr[3]) / 2.0)
+                    else:
+                        continue
+
+                    # Previous position: try multiple fallbacks
+                    prev_pos = None
+                    if hasattr(track, '_last_pos'):
+                        prev_pos = getattr(track, '_last_pos')
+                    elif hasattr(track, 'last_tlbr'):
+                        lt = getattr(track, 'last_tlbr')
+                        prev_pos = ((lt[0] + lt[2]) / 2.0, (lt[1] + lt[3]) / 2.0)
+                    elif hasattr(track, 'history') and len(getattr(track, 'history')) >= 1:
+                        hist = getattr(track, 'history')
+                        prev = hist[-1]
+                        if len(prev) >= 2:
+                            prev_pos = (float(prev[0]), float(prev[1]))
+
+                    if prev_pos is None:
+                        continue
+
+                    prev_x, prev_y = float(prev_pos[0]), float(prev_pos[1])
+
+                    # Line endpoints may be attributes or properties
+                    ls = getattr(line_zone, 'start', None) or getattr(line_zone, 'start_point', None)
+                    le = getattr(line_zone, 'end', None) or getattr(line_zone, 'end_point', None)
+                    if ls is None or le is None:
+                        continue
+
+                    # Extract numeric coords
+                    ls_x, ls_y = float(getattr(ls, 'x', ls[0] if isinstance(ls, (list, tuple)) else 0)), float(getattr(ls, 'y', ls[1] if isinstance(ls, (list, tuple)) else 0))
+                    le_x, le_y = float(getattr(le, 'x', le[0] if isinstance(le, (list, tuple)) else 0)), float(getattr(le, 'y', le[1] if isinstance(le, (list, tuple)) else 0))
+
+                    crosses = self._segment_intersects_line(
+                        (prev_x, prev_y),
+                        (curr_x, curr_y),
+                        (ls_x, ls_y),
+                        (le_x, le_y),
+                    )
+
+                    if crosses:
+                        direction = self._determine_motion_direction((prev_x, prev_y), (curr_x, curr_y))
+                        if direction == "in":
+                            in_count += 1
+                        else:
+                            out_count += 1
+
+                        track_id = getattr(track, 'track_id', getattr(track, 'id', None))
+                        try:
+                            logger.info(
+                                "Camera '%s': Motion extrapolation crossing detected - Track %s: %s (pos: %.0f,%.0f)",
+                                self.camera_id,
+                                str(track_id),
+                                direction,
+                                curr_x,
+                                curr_y,
+                            )
+                        except Exception:
+                            pass
+
+                except Exception:
+                    # Be robust: don't let track attribute differences stop processing
+                    continue
         
         return in_count, out_count
 
@@ -511,11 +565,28 @@ class SupervisionTracker:
         xyxy[:, 3] = np.minimum(xyxy[:, 3], frame_h + expand_px)
         
         # Update detections with expanded ROI and valid mask filter
-        detections.xyxy = xyxy
-        if not np.all(valid_mask):
-            detections = detections[valid_mask]
-        
-        return detections
+        detections_xyxy = xyxy
+        confidences = getattr(detections, 'confidence', None)
+
+        # Build a new Detections object filtered by valid_mask to avoid typing issues
+        if confidences is None:
+            new_conf = None
+        else:
+            new_conf = np.array(confidences, copy=True)
+
+        # Apply mask
+        mask = np.array(valid_mask, dtype=bool)
+        filtered_xyxy = detections_xyxy[mask]
+        if new_conf is not None:
+            filtered_conf = new_conf[mask]
+        else:
+            filtered_conf = None
+
+        new_det = sv.Detections(xyxy=filtered_xyxy, confidence=filtered_conf, class_id=getattr(detections, 'class_id', None))
+        if getattr(detections, 'tracker_id', None) is not None:
+            new_det.tracker_id = np.array(getattr(detections, 'tracker_id'))[mask]
+
+        return new_det
 
     def start(self) -> None:
         """Start the processing thread."""
