@@ -446,6 +446,9 @@ class SupervisionTracker:
         else:
             detections = sv.Detections.empty()
 
+        if self._line_zone is not None:
+            self._line_zone.trigger(detections)
+
         new_in, new_out = self._update_crossing_state(detections)
 
         if new_in > 0 or new_out > 0:
@@ -505,7 +508,14 @@ class SupervisionTracker:
                 line_counter=self._line_zone
             )
 
-        if self.state_manager is not None:
+        if self._line_zone is not None:
+            self._draw_stats_overlay(
+                annotated_frame,
+                int(self._line_zone.in_count),
+                int(self._line_zone.out_count),
+                int(self._line_zone.in_count) - int(self._line_zone.out_count)
+            )
+        elif self.state_manager is not None:
             global_stats = self.state_manager.get_stats()
             self._draw_stats_overlay(
                 annotated_frame,
