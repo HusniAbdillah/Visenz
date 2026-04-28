@@ -400,7 +400,7 @@
                 <div class="panel-head">
                     <div>
                         <h2 class="panel-title">Time-Series Trend</h2>
-                        <div class="panel-subtitle">15-minute aggregation from the SQLite event log</div>
+                        <div class="panel-subtitle">Daily aggregation from the active session log</div>
                     </div>
                 </div>
                 <div class="chart-wrap">
@@ -542,7 +542,7 @@
         }
 
         function renderTrendChart(timeSeries = []) {
-            const labels = timeSeries.map((item) => `${item.interval_start.slice(11, 16)} WIB`);
+            const labels = timeSeries.map((item) => item.bucket_label || item.interval_start || '');
             const inSeries = timeSeries.map((item) => item.total_in || 0);
             const outSeries = timeSeries.map((item) => item.total_out || 0);
 
@@ -590,8 +590,8 @@
                             callbacks: {
                                 title: (items) => {
                                     const index = items?.[0]?.dataIndex ?? 0;
-                                    return timeSeries[index]?.interval_start ? `${timeSeries[index].interval_start} WIB` : 'WIB';
-                                },
+                                    return timeSeries[index]?.bucket_label || timeSeries[index]?.interval_start || 'WIB';
+                                }
                             },
                         },
                     },
@@ -651,7 +651,7 @@
 
         async function refreshStats() {
             try {
-                const response = await fetch('/api/stats?interval_minutes=15', { cache: 'no-store' });
+                const response = await fetch('/api/stats?trend_granularity=day', { cache: 'no-store' });
                 const data = await response.json();
 
                 if (!response.ok) {

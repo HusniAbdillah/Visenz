@@ -7,7 +7,7 @@ Strictly decoupled from video capture - takes ThreadedVideoReader and StateManag
 import logging
 import threading
 import time
-from collections import deque
+from contextlib import nullcontext
 from typing import Dict, List, Optional, Tuple, Any
 
 import cv2
@@ -76,18 +76,9 @@ class SupervisionTracker:
 
         self._local_in_count: int = 0
         self._local_out_count: int = 0
-        self._last_line_in: int = 0
-        self._last_line_out: int = 0
-        self._line_start_np: Optional[np.ndarray] = None
-        self._line_end_np: Optional[np.ndarray] = None
-        self._line_vec: Optional[np.ndarray] = None
-
-        self._crossing_deadzone_px: float = float(getattr(config, "LINE_BUFFER_ZONE_PX", 20.0))
-        self._crossing_cooldown_frames: int = int(getattr(config, "LINE_CROSSING_COOLDOWN_FRAMES", 18))
-        self._min_track_age_frames: int = int(getattr(config, "DETECTION_MIN_CONSECUTIVE", 2))
-        self._min_motion_px: float = float(getattr(config, "LINE_MIN_MOTION_PX", 3.0))
-        self._track_stale_frames: int = int(getattr(config, "TRACK_STATE_STALE_FRAMES", 180))
-        self._track_states: Dict[int, Dict[str, Any]] = {}
+        self._line_start: Optional[sv.Point] = None
+        self._line_end: Optional[sv.Point] = None
+        self._count_lock: threading.Lock = threading.Lock()
 
         self._initialized: bool = False
 
@@ -148,9 +139,8 @@ class SupervisionTracker:
         )
 
         line_start, line_end = self._calculate_line_coordinates(frame_w, frame_h)
-        self._line_start_np = np.array([float(line_start.x), float(line_start.y)], dtype=np.float32)
-        self._line_end_np = np.array([float(line_end.x), float(line_end.y)], dtype=np.float32)
-        self._line_vec = self._line_end_np - self._line_start_np
+        self._line_start = line_start
+        self._line_end = line_end
         logger.info(
             "Camera '%s': Line coordinates: start=%s, end=%s",
             self.camera_id,
@@ -236,102 +226,6 @@ class SupervisionTracker:
 
         return start, end
 
-    def _line_side_value(self, point: np.ndarray) -> float:
-        if self._line_start_np is None or self._line_vec is None:
-            return 0.0
-        rel = point - self._line_start_np
-        return float((self._line_vec[0] * rel[1]) - (self._line_vec[1] * rel[0]))
-
-    def _distance_to_line(self, side_value: float) -> float:
-        if self._line_vec is None:
-            return 0.0
-        denom = float(np.linalg.norm(self._line_vec))
-        if denom <= 1e-6:
-            return 0.0
-        return abs(side_value) / denom
-
-    def _is_in_direction(self, motion: np.ndarray) -> bool:
-        if self.in_direction == "left_to_right":
-            return float(motion[0]) > self._min_motion_px
-        if self.in_direction == "right_to_left":
-            return float(motion[0]) < -self._min_motion_px
-        if self.in_direction == "top_to_bottom":
-            return float(motion[1]) > self._min_motion_px
-        if self.in_direction == "bottom_to_top":
-            return float(motion[1]) < -self._min_motion_px
-        return False
-
-    def _update_crossing_state(self, detections: sv.Detections) -> Tuple[int, int]:
-        if detections.tracker_id is None or self._line_vec is None:
-            return 0, 0
-
-        new_in = 0
-        new_out = 0
-        active_ids = set()
-
-        for idx, tracker_id in enumerate(detections.tracker_id):
-            if tracker_id is None:
-                continue
-
-            track_id = int(tracker_id)
-            active_ids.add(track_id)
-            x1, y1, x2, y2 = detections.xyxy[idx]
-            anchor = np.array([float((x1 + x2) * 0.5), float(y2)], dtype=np.float32)
-
-            state = self._track_states.setdefault(
-                track_id,
-                {
-                    "age": 0,
-                    "last_point": anchor,
-                    "last_stable_side": None,
-                    "last_count_frame": -100000,
-                    "last_seen_frame": self._frame_count,
-                    "history": deque(maxlen=12),
-                },
-            )
-
-            state["age"] += 1
-            state["last_seen_frame"] = self._frame_count
-            state["history"].append((float(anchor[0]), float(anchor[1])))
-
-            side_value = self._line_side_value(anchor)
-            line_dist = self._distance_to_line(side_value)
-            stable_sign = 1 if side_value > 0 else -1
-
-            prev_point = np.array(state["last_point"], dtype=np.float32)
-            motion = anchor - prev_point
-            prev_stable_side = state["last_stable_side"]
-
-            if line_dist > self._crossing_deadzone_px:
-                state["last_stable_side"] = stable_sign
-
-            can_count = (
-                prev_stable_side is not None
-                and line_dist > self._crossing_deadzone_px
-                and prev_stable_side != stable_sign
-                and state["age"] >= self._min_track_age_frames
-                and (self._frame_count - int(state["last_count_frame"])) >= self._crossing_cooldown_frames
-            )
-
-            if can_count:
-                if self._is_in_direction(motion):
-                    new_in += 1
-                elif np.linalg.norm(motion) >= self._min_motion_px:
-                    new_out += 1
-                state["last_count_frame"] = self._frame_count
-
-            state["last_point"] = anchor
-
-        stale_ids = [
-            tid
-            for tid, state in self._track_states.items()
-            if tid not in active_ids and (self._frame_count - int(state.get("last_seen_frame", 0))) > self._track_stale_frames
-        ]
-        for tid in stale_ids:
-            self._track_states.pop(tid, None)
-
-        return new_in, new_out
-
     def _determine_in_out_direction(self) -> Tuple[str, str]:
         """
         Determine which LineZone count corresponds to IN and OUT.
@@ -349,6 +243,21 @@ class SupervisionTracker:
             return ("out_count", "in_count")
         else:
             return ("in_count", "out_count")
+
+    def reset_counts(self) -> None:
+        """Reset local camera counters and line-zone state for a new session."""
+        with self._count_lock:
+            self._local_in_count = 0
+            self._local_out_count = 0
+
+            if self._line_start is not None and self._line_end is not None:
+                self._line_zone = sv.LineZone(
+                    start=self._line_start,
+                    end=self._line_end,
+                    triggering_anchors=(sv.Position.CENTER,),
+                )
+
+        logger.info("Camera '%s': Local counters reset", self.camera_id)
 
     def start(self) -> None:
         """Start the processing thread."""
@@ -446,35 +355,46 @@ class SupervisionTracker:
         else:
             detections = sv.Detections.empty()
 
-        if self._line_zone is not None:
-            self._line_zone.trigger(detections)
+        session_guard = self.state_manager.session_mutation() if self.state_manager is not None else nullcontext()
+        with session_guard:
+            with self._count_lock:
+                if self._line_zone is not None:
+                    crossed_in, crossed_out = self._line_zone.trigger(detections)
+                    line_in_count = int(np.count_nonzero(crossed_in))
+                    line_out_count = int(np.count_nonzero(crossed_out))
 
-        new_in, new_out = self._update_crossing_state(detections)
+                    in_attr, out_attr = self._determine_in_out_direction()
+                    if in_attr == "in_count" and out_attr == "out_count":
+                        new_in, new_out = line_in_count, line_out_count
+                    else:
+                        new_in, new_out = line_out_count, line_in_count
+                else:
+                    new_in, new_out = 0, 0
 
-        if new_in > 0 or new_out > 0:
-            if self.state_manager is not None:
-                if new_in > 0:
-                    self.state_manager.record_crossing(
-                        camera_id=self.camera_id,
-                        direction="IN",
-                        count=new_in,
+                if new_in > 0 or new_out > 0:
+                    if self.state_manager is not None:
+                        if new_in > 0:
+                            self.state_manager.record_crossing(
+                                camera_id=self.camera_id,
+                                direction="IN",
+                                count=new_in,
+                            )
+                        if new_out > 0:
+                            self.state_manager.record_crossing(
+                                camera_id=self.camera_id,
+                                direction="OUT",
+                                count=new_out,
+                            )
+                    self._local_in_count += new_in
+                    self._local_out_count += new_out
+                    logger.info(
+                        "Camera '%s': Vector crossing - IN: +%d (total: %d), OUT: +%d (total: %d)",
+                        self.camera_id,
+                        new_in,
+                        self._local_in_count,
+                        new_out,
+                        self._local_out_count,
                     )
-                if new_out > 0:
-                    self.state_manager.record_crossing(
-                        camera_id=self.camera_id,
-                        direction="OUT",
-                        count=new_out,
-                    )
-            self._local_in_count += new_in
-            self._local_out_count += new_out
-            logger.info(
-                "Camera '%s': Vector crossing - IN: +%d (total: %d), OUT: +%d (total: %d)",
-                self.camera_id,
-                new_in,
-                self._local_in_count,
-                new_out,
-                self._local_out_count,
-            )
 
         annotated_frame = frame.copy()
 
@@ -508,14 +428,7 @@ class SupervisionTracker:
                 line_counter=self._line_zone
             )
 
-        if self._line_zone is not None:
-            self._draw_stats_overlay(
-                annotated_frame,
-                int(self._line_zone.in_count),
-                int(self._line_zone.out_count),
-                int(self._line_zone.in_count) - int(self._line_zone.out_count)
-            )
-        elif self.state_manager is not None:
+        if self.state_manager is not None:
             global_stats = self.state_manager.get_stats()
             self._draw_stats_overlay(
                 annotated_frame,
@@ -784,15 +697,26 @@ class CameraManager:
                 'total_out': 0,
                 'current_inside': 0
             }
+            camera_summary = []
         else:
             global_stats = self.state_manager.get_stats()
+            analytics = self.state_manager.get_analytics()
+            camera_summary = analytics.get('camera_summary', [])
         
         camera_stats = []
         connected_count = 0
+        camera_summary_map = {item['camera_id']: item for item in camera_summary}
 
         with self._lock:
             for camera_id, tracker in self._trackers.items():
-                local_stats = tracker.get_local_stats()
+                summary = camera_summary_map.get(camera_id, {})
+                local_stats = {
+                    'camera_id': camera_id,
+                    'local_in': int(summary.get('total_in', 0)),
+                    'local_out': int(summary.get('total_out', 0)),
+                    'connected': tracker.video_reader.is_connected(),
+                    'reconnect_count': tracker.video_reader.get_reconnect_count(),
+                }
                 camera_stats.append(local_stats)
                 if local_stats.get('connected', False):
                     connected_count += 1
@@ -819,7 +743,19 @@ class CameraManager:
         with self._lock:
             tracker = self._trackers.get(camera_id)
             if tracker:
-                return tracker.get_local_stats()
+                if self.state_manager is None:
+                    return tracker.get_local_stats()
+
+                analytics = self.state_manager.get_analytics()
+                summary_map = {item['camera_id']: item for item in analytics.get('camera_summary', [])}
+                summary = summary_map.get(camera_id, {})
+                return {
+                    'camera_id': camera_id,
+                    'local_in': int(summary.get('total_in', 0)),
+                    'local_out': int(summary.get('total_out', 0)),
+                    'connected': tracker.video_reader.is_connected(),
+                    'reconnect_count': tracker.video_reader.get_reconnect_count(),
+                }
             return None
 
     def stop(self) -> None:
@@ -841,3 +777,18 @@ class CameraManager:
 
         cv2.destroyAllWindows()
         logger.info("CameraManager stopped")
+
+    def reset_all_camera_counts(self) -> None:
+        """Reset local counters for every active camera tracker."""
+        with self._lock:
+            for camera_id, tracker in self._trackers.items():
+                try:
+                    logger.info("Resetting local counters for camera '%s'", camera_id)
+                    tracker.reset_counts()
+                except Exception as exc:
+                    logger.error(
+                        "Failed to reset local counters for camera '%s': %s",
+                        camera_id,
+                        str(exc),
+                        exc_info=True,
+                    )

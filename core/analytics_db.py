@@ -163,8 +163,14 @@ class AnalyticsDB:
                 normalized,
             )
 
-    def fetch_time_series(self, start_at: str, session_id: str, interval_minutes: int = 15) -> List[Dict[str, Any]]:
-        interval_minutes = max(1, int(interval_minutes))
+    def fetch_time_series(
+        self,
+        start_at: str,
+        session_id: str,
+        interval_minutes: int = 15,
+        granularity: str = "interval",
+    ) -> List[Dict[str, Any]]:
+        granularity = str(granularity).lower()
         with self._connect() as conn:
             rows = conn.execute(
                 """
@@ -180,7 +186,11 @@ class AnalyticsDB:
         buckets: Dict[str, Dict[str, Any]] = defaultdict(lambda: {"total_in": 0, "total_out": 0})
 
         for row in rows:
-            bucket = self._bucket_timestamp(row["timestamp_wib"], interval_minutes)
+            if granularity == "day":
+                bucket = self._bucket_day(row["timestamp_wib"])
+            else:
+                interval_minutes = max(1, int(interval_minutes))
+                bucket = self._bucket_timestamp(row["timestamp_wib"], interval_minutes)
             bucket_data = buckets[bucket]
             if row["direction"] == "IN":
                 bucket_data["total_in"] += 1
@@ -190,9 +200,14 @@ class AnalyticsDB:
         ordered: List[Dict[str, Any]] = []
         for bucket in sorted(buckets.keys()):
             item = buckets[bucket]
+            if granularity == "day":
+                bucket_label = bucket[:10]
+            else:
+                bucket_label = bucket[11:16]
             ordered.append(
                 {
                     "interval_start": bucket,
+                    "bucket_label": bucket_label,
                     "total_in": item["total_in"],
                     "total_out": item["total_out"],
                     "net_in": item["total_in"] - item["total_out"],
@@ -256,4 +271,9 @@ class AnalyticsDB:
         parsed = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
         bucket_minute = (parsed.minute // interval_minutes) * interval_minutes
         bucket = parsed.replace(minute=bucket_minute, second=0, microsecond=0)
+        return bucket.strftime("%Y-%m-%d %H:%M:%S")
+
+    def _bucket_day(self, timestamp: str) -> str:
+        parsed = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
+        bucket = parsed.replace(hour=0, minute=0, second=0, microsecond=0)
         return bucket.strftime("%Y-%m-%d %H:%M:%S")

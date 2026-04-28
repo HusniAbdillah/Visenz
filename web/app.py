@@ -233,7 +233,10 @@ def api_stats():
 
     try:
         stats = state_manager.get_stats()
-        analytics = state_manager.get_analytics(interval_minutes=int(request.args.get('interval_minutes', 15)))
+        analytics = state_manager.get_analytics(
+            interval_minutes=int(request.args.get('interval_minutes', 15)),
+            trend_granularity=str(request.args.get('trend_granularity', 'day')),
+        )
         
         result = {
             'total_in': stats['total_in'],
@@ -243,6 +246,7 @@ def api_stats():
             'timezone': stats.get('timezone', 'Asia/Jakarta'),
             'last_reset_at': stats.get('last_reset_at'),
             'interval_minutes': analytics.get('interval_minutes', 15),
+            'trend_granularity': analytics.get('trend_granularity', 'day'),
             'time_series': analytics.get('time_series', []),
             'camera_summary': analytics.get('camera_summary', []),
             'generated_at': _wib_now(),
@@ -370,7 +374,11 @@ def reset():
         if provided_password != reset_password:
             return jsonify({'error': 'Invalid password'}), 403
 
-        state_manager.reset()
+        with state_manager.session_mutation():
+            if camera_manager is not None:
+                camera_manager.reset_all_camera_counts()
+
+            state_manager.reset()
         
         logger.info("All counts reset via API")
 

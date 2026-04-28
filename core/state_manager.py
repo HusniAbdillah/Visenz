@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -32,11 +33,13 @@ class StateManager:
         self._db_path: Path = config.PROJECT_ROOT / db_file
         self._analytics_db = AnalyticsDB(self._db_path)
         self._lock: threading.Lock = threading.Lock()
+        self._session_lock: threading.RLock = threading.RLock()
         self._total_in: int = 0
         self._total_out: int = 0
         self._session_id: str = self._new_session_id()
         self._last_reset_at: str = self._wib_now()
         self._load_state()
+        self._ensure_daily_session()
 
     @staticmethod
     def _wib_now() -> str:
@@ -45,6 +48,10 @@ class StateManager:
     @staticmethod
     def _new_session_id() -> str:
         return datetime.now(WIB_TZ).strftime("%Y%m%d%H%M%S") + "-" + uuid4().hex[:8]
+
+    @staticmethod
+    def _wib_today() -> str:
+        return datetime.now(WIB_TZ).strftime("%Y-%m-%d")
 
     def _load_state(self) -> None:
         """
@@ -103,6 +110,20 @@ class StateManager:
                 self._total_out = 0
                 self._session_id = self._new_session_id()
                 self._last_reset_at = self._wib_now()
+
+    def _ensure_daily_session(self) -> None:
+        """Roll the live session forward when the stored session belongs to a previous day."""
+        stored_day = str(self._last_reset_at)[:10]
+        today = self._wib_today()
+        if stored_day == today:
+            return
+
+        logger.info(
+            "Stored session day %s differs from today %s. Starting a fresh daily session.",
+            stored_day,
+            today,
+        )
+        self.reset()
 
     def _save_state(self) -> None:
         """
@@ -164,27 +185,28 @@ class StateManager:
 
         timestamp_wib = timestamp or self._wib_now()
 
-        with self._lock:
-            current_session_id = self._session_id
-            events = [(timestamp_wib, camera_id, direction, current_session_id) for _ in range(int(count))]
+        with self._session_lock:
+            with self._lock:
+                current_session_id = self._session_id
+                events = [(timestamp_wib, camera_id, direction, current_session_id) for _ in range(int(count))]
 
-            if direction == "IN":
-                self._total_in += int(count)
-            else:
-                self._total_out += int(count)
+                if direction == "IN":
+                    self._total_in += int(count)
+                else:
+                    self._total_out += int(count)
 
-            self._analytics_db.record_events(events)
-            self._save_state()
+                self._analytics_db.record_events(events)
+                self._save_state()
 
-            logger.info(
-                "Recorded %d %s crossing(s) for camera '%s' in session '%s'. Totals: in=%d, out=%d",
-                count,
-                direction,
-                camera_id,
-                current_session_id,
-                self._total_in,
-                self._total_out,
-            )
+                logger.info(
+                    "Recorded %d %s crossing(s) for camera '%s' in session '%s'. Totals: in=%d, out=%d",
+                    count,
+                    direction,
+                    camera_id,
+                    current_session_id,
+                    self._total_in,
+                    self._total_out,
+                )
 
     def get_total_in(self) -> int:
         """
@@ -233,17 +255,25 @@ class StateManager:
                 "timezone": "Asia/Jakarta",
             }
 
-    def get_analytics(self, interval_minutes: int = 15) -> Dict[str, Any]:
+    def get_analytics(self, interval_minutes: int = 15, trend_granularity: str = "day") -> Dict[str, Any]:
         """Return time-series and per-camera aggregates for the current session."""
         with self._lock:
             start_at = self._last_reset_at
             session_id = self._session_id
+            granularity = str(trend_granularity).lower()
+            effective_interval_minutes = 1440 if granularity == "day" else int(interval_minutes)
         return {
-            "interval_minutes": int(interval_minutes),
+            "interval_minutes": effective_interval_minutes,
+            "trend_granularity": granularity,
             "start_at": start_at,
             "session_id": session_id,
             "timezone": "Asia/Jakarta",
-            "time_series": self._analytics_db.fetch_time_series(start_at, session_id=session_id, interval_minutes=interval_minutes),
+            "time_series": self._analytics_db.fetch_time_series(
+                start_at,
+                session_id=session_id,
+                interval_minutes=interval_minutes,
+                granularity=granularity,
+            ),
             "camera_summary": self._analytics_db.fetch_camera_summary(start_at, session_id=session_id),
         }
 
@@ -265,29 +295,37 @@ class StateManager:
         Args:
             target: Desired current_inside value.
         """
-        with self._lock:
-            new_total_out = self._total_in - target
-            old_total_out = self._total_out
-            self._total_out = new_total_out
-            self._save_state()
-            logger.info(
-                "Manual calibration: target_inside=%d, adjusted total_out from %d to %d",
-                target,
-                old_total_out,
-                self._total_out
-            )
+        with self._session_lock:
+            with self._lock:
+                new_total_out = self._total_in - target
+                old_total_out = self._total_out
+                self._total_out = new_total_out
+                self._save_state()
+                logger.info(
+                    "Manual calibration: target_inside=%d, adjusted total_out from %d to %d",
+                    target,
+                    old_total_out,
+                    self._total_out
+                )
 
     def reset(self) -> None:
         """
         Start a new active session and reset live counters only.
         """
-        with self._lock:
-            self._total_in = 0
-            self._total_out = 0
-            self._session_id = self._new_session_id()
-            self._last_reset_at = self._wib_now()
-            self._save_state()
-            logger.info("State reset for new session '%s'. total_in=0, total_out=0", self._session_id)
+        with self._session_lock:
+            with self._lock:
+                self._total_in = 0
+                self._total_out = 0
+                self._session_id = self._new_session_id()
+                self._last_reset_at = self._wib_now()
+                self._save_state()
+                logger.info("State reset for new session '%s'. total_in=0, total_out=0", self._session_id)
+
+    @contextmanager
+    def session_mutation(self):
+        """Serialize session-changing operations against live counting."""
+        with self._session_lock:
+            yield
 
     def bulk_update(self, new_in: int, new_out: int, camera_id: str = "legacy", timestamp: Optional[str] = None) -> None:
         """
