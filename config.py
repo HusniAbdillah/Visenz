@@ -144,3 +144,23 @@ MDNS_ENABLED = True
 MDNS_SERVICE_NAME = os.environ.get("COUNTER_MDNS_SERVICE_NAME", "counter-gww")
 MDNS_HOSTNAME = os.environ.get("COUNTER_MDNS_HOSTNAME", "counter-gww")
 
+# ============================================================================
+# PHASE 1-3: LATERAL OCCLUSION HANDLING
+# ============================================================================
+# Enable all occlusion-robust detection and crossing validation strategies
+
+# Phase 1: Edge-Aware Confidence Boost
+# Boosts confidence for detections at frame edges (partial visibility)
+EDGE_OCCLUSION_CONFIDENCE_FLOOR = 0.20      # Minimum confidence at edge (normally 0.35)
+EDGE_OCCLUSION_CONFIDENCE_BOOST = 0.10      # Confidence boost amount for edge detections
+EDGE_ZONE_MARGIN_PX = 80                    # Pixels from frame edge considered "edge zone"
+
+# Phase 2: Motion-Aware Crossing Validation
+# Uses ByteTrack history to detect crossings even with brief detection gaps
+MOTION_EXTRAPOLATION_ENABLED = True         # Enable track momentum-based crossing detection
+LOST_TRACK_REACQ_DISTANCE_PX = 150          # Max distance for track re-identification at re-acquisition
+
+# Phase 3: Edge-Aware ROI Expansion
+# Allow detections slightly outside frame bounds for partial people
+VIRTUAL_EDGE_EXPANSION_PX = 100             # Allow detections this far outside frame edges
+

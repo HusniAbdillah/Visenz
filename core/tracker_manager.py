@@ -259,6 +259,264 @@ class SupervisionTracker:
 
         logger.info("Camera '%s': Local counters reset", self.camera_id)
 
+    def _boost_edge_confidence(
+        self,
+        detections: sv.Detections,
+        frame_w: int,
+        frame_h: int,
+    ) -> sv.Detections:
+        """
+        PHASE 1: Edge-Aware Confidence Boost
+        
+        Boost confidence for detections at frame edges (partial visibility).
+        YOLOv8n produces lower confidence for partial objects; this recovers
+        confidence for valid edge detections based on spatial position.
+        
+        Args:
+            detections: Input detections from YOLOv8n
+            frame_w: Frame width in pixels
+            frame_h: Frame height in pixels
+            
+        Returns:
+            Detections with boosted confidence for edge cases
+        """
+        if len(detections) == 0:
+            return detections
+        
+        edge_margin = int(getattr(config, "EDGE_ZONE_MARGIN_PX", 80))
+        confidence_floor = float(getattr(config, "EDGE_OCCLUSION_CONFIDENCE_FLOOR", 0.20))
+        confidence_boost = float(getattr(config, "EDGE_OCCLUSION_CONFIDENCE_BOOST", 0.10))
+        
+        xyxy = detections.xyxy.copy()
+        confidence = detections.confidence.copy()
+        
+        for i, (x1, y1, x2, y2) in enumerate(xyxy):
+            # Check if bbox is at frame edge
+            at_left_edge = x1 <= edge_margin
+            at_right_edge = x2 >= (frame_w - edge_margin)
+            at_top_edge = y1 <= edge_margin
+            at_bottom_edge = y2 >= (frame_h - edge_margin)
+            
+            is_at_edge = at_left_edge or at_right_edge or at_top_edge or at_bottom_edge
+            
+            # Only boost if confidence is above floor and at edge
+            if is_at_edge and confidence[i] > confidence_floor:
+                # Boost based on visibility ratio (more partial = more boost)
+                bbox_area = (x2 - x1) * (y2 - y1)
+                frame_area = frame_w * frame_h
+                visibility_ratio = bbox_area / frame_area if frame_area > 0 else 1.0
+                
+                # More boost for more partial (lower visibility)
+                boost_factor = confidence_boost * (1.5 - visibility_ratio)
+                new_conf = min(0.95, confidence[i] + boost_factor)
+                confidence[i] = new_conf
+                
+                logger.debug(
+                    "Camera '%s': Boosted edge detection conf: %.2f → %.2f (visibility: %.1f%%)",
+                    self.camera_id,
+                    confidence[i] - boost_factor,
+                    new_conf,
+                    visibility_ratio * 100
+                )
+        
+        detections.confidence = confidence
+        return detections
+
+    def _validate_crossing_with_motion(
+        self,
+        line_zone: sv.LineZone,
+        detections: sv.Detections,
+        frame_w: int,
+        frame_h: int,
+    ) -> Tuple[int, int]:
+        """
+        PHASE 2: Motion-Aware Crossing Validation
+        
+        Use ByteTrack's tracking history to detect crossings even with
+        brief detection gaps (occlusion). When a track is re-acquired
+        after being lost, check if the motion trajectory crosses the line.
+        
+        Args:
+            line_zone: LineZone instance for crossing detection
+            detections: Current frame detections
+            frame_w: Frame width
+            frame_h: Frame height
+            
+        Returns:
+            Tuple of (in_count, out_count) from primary + motion-based crossings
+        """
+        if line_zone is None or self._byte_tracker is None:
+            return 0, 0
+        
+        # Primary crossing detection
+        crossed_in, crossed_out = line_zone.trigger(detections)
+        in_count = int(np.count_nonzero(crossed_in))
+        out_count = int(np.count_nonzero(crossed_out))
+        
+        # Secondary: Check momentum-based crossings for re-emerging tracks
+        motion_extrapolation = bool(getattr(config, "MOTION_EXTRAPOLATION_ENABLED", True))
+        
+        if motion_extrapolation and hasattr(self._byte_tracker, 'tracked_tracks'):
+            reacq_distance = int(getattr(config, "LOST_TRACK_REACQ_DISTANCE_PX", 150))
+            
+            for track in self._byte_tracker.tracked_tracks:
+                # Check for recently re-acquired tracks (time_since_update == 0)
+                if track.time_since_update == 0 and hasattr(track, 'kalman_filter'):
+                    kalman_mean = track.mean if hasattr(track, 'mean') else None
+                    
+                    if kalman_mean is not None and len(kalman_mean) >= 2:
+                        # Current position
+                        curr_x, curr_y = kalman_mean[0], kalman_mean[1]
+                        
+                        # Previous position (from last confirmation)
+                        if hasattr(track, 'hits') and track.hits >= 2:
+                            # Safe to use history
+                            if hasattr(track, '_last_pos'):
+                                prev_x, prev_y = track._last_pos
+                                
+                                # Check if motion crosses line
+                                line_start = line_zone.start
+                                line_end = line_zone.end
+                                
+                                # Segment from prev to curr
+                                crosses = self._segment_intersects_line(
+                                    (prev_x, prev_y),
+                                    (curr_x, curr_y),
+                                    (line_start.x, line_start.y),
+                                    (line_end.x, line_end.y),
+                                )
+                                
+                                if crosses:
+                                    direction = self._determine_motion_direction(
+                                        (prev_x, prev_y),
+                                        (curr_x, curr_y),
+                                    )
+                                    
+                                    if direction == "in":
+                                        in_count += 1
+                                    else:
+                                        out_count += 1
+                                    
+                                    logger.info(
+                                        "Camera '%s': Motion extrapolation crossing detected - "
+                                        "Track %d: %s (pos: %.0f,%.0f)",
+                                        self.camera_id,
+                                        track.track_id,
+                                        direction,
+                                        curr_x,
+                                        curr_y
+                                    )
+        
+        return in_count, out_count
+
+    def _segment_intersects_line(
+        self,
+        p1: Tuple[float, float],
+        p2: Tuple[float, float],
+        line_start: Tuple[float, float],
+        line_end: Tuple[float, float],
+    ) -> bool:
+        """
+        Check if a segment (p1->p2) intersects with a line.
+        
+        Args:
+            p1: Start point (x, y)
+            p2: End point (x, y)
+            line_start: Line start point (x, y)
+            line_end: Line end point (x, y)
+            
+        Returns:
+            True if segment crosses the line
+        """
+        def ccw(A, B, C):
+            """Counter-clockwise check for line intersection."""
+            return (C[1] - A[1]) * (B[0] - A[0]) > (B[1] - A[1]) * (C[0] - A[0])
+        
+        # Check if segment p1-p2 intersects with line_start-line_end
+        return ccw(p1, line_start, line_end) != ccw(p2, line_start, line_end) and \
+               ccw(p1, p2, line_start) != ccw(p1, p2, line_end)
+
+    def _determine_motion_direction(
+        self,
+        p1: Tuple[float, float],
+        p2: Tuple[float, float],
+    ) -> str:
+        """
+        Determine crossing direction based on motion vector and configured in_direction.
+        
+        Args:
+            p1: Previous position
+            p2: Current position
+            
+        Returns:
+            "in" or "out" based on motion direction
+        """
+        dx = p2[0] - p1[0]
+        dy = p2[1] - p1[1]
+        
+        if self.orientation == "vertical":
+            # Vertical line: check horizontal motion
+            if self.in_direction == "left_to_right":
+                return "in" if dx > 0 else "out"
+            else:  # right_to_left
+                return "in" if dx < 0 else "out"
+        else:  # horizontal orientation
+            # Horizontal line: check vertical motion
+            if self.in_direction == "top_to_bottom":
+                return "in" if dy > 0 else "out"
+            else:  # bottom_to_top
+                return "in" if dy < 0 else "out"
+
+    def _expand_detection_roi(
+        self,
+        detections: sv.Detections,
+        frame_w: int,
+        frame_h: int,
+    ) -> sv.Detections:
+        """
+        PHASE 3: Edge-Aware ROI Expansion
+        
+        Allow detections slightly outside frame bounds for people who are
+        partially off-screen. This enables tracking and line crossing detection
+        for people whose center is visible but edges are clipped.
+        
+        Args:
+            detections: Input detections
+            frame_w: Frame width
+            frame_h: Frame height
+            
+        Returns:
+            Detections with centers inside frame (edges may be outside)
+        """
+        if len(detections) == 0:
+            return detections
+        
+        expand_px = int(getattr(config, "VIRTUAL_EDGE_EXPANSION_PX", 100))
+        xyxy = detections.xyxy.copy()
+        
+        # Calculate centers
+        centers_x = (xyxy[:, 0] + xyxy[:, 2]) / 2
+        centers_y = (xyxy[:, 1] + xyxy[:, 3]) / 2
+        
+        # Keep only bboxes with center inside frame
+        valid_mask = (
+            (centers_x >= 0) & (centers_x < frame_w) &
+            (centers_y >= 0) & (centers_y < frame_h)
+        )
+        
+        # Clamp bbox edges (allow outside but with limit)
+        xyxy[:, 0] = np.maximum(xyxy[:, 0], -expand_px)
+        xyxy[:, 2] = np.minimum(xyxy[:, 2], frame_w + expand_px)
+        xyxy[:, 1] = np.maximum(xyxy[:, 1], -expand_px)
+        xyxy[:, 3] = np.minimum(xyxy[:, 3], frame_h + expand_px)
+        
+        # Update detections with expanded ROI and valid mask filter
+        detections.xyxy = xyxy
+        if not np.all(valid_mask):
+            detections = detections[valid_mask]
+        
+        return detections
+
     def start(self) -> None:
         """Start the processing thread."""
         if self._running:
@@ -316,6 +574,7 @@ class SupervisionTracker:
     def _process_frame(self, frame: np.ndarray) -> np.ndarray:
         """
         Process a single frame: detect, track, count crossings, annotate.
+        Includes occlusion-robust detection handling (Phases 1-3).
 
         Args:
             frame: Input BGR frame.
@@ -326,6 +585,8 @@ class SupervisionTracker:
         if not self._initialized or self._line_zone is None or self._byte_tracker is None:
             logger.error("Camera '%s': Supervision components not initialized, skipping frame", self.camera_id)
             return frame
+
+        frame_h, frame_w = frame.shape[:2]
 
         detection_result = self.model.predict_with_tracking(
             frame,
@@ -347,6 +608,12 @@ class SupervisionTracker:
                 class_id=np.zeros(len(boxes_array), dtype=int),
             )
 
+            # PHASE 3: Expand detection ROI for partial objects
+            detections = self._expand_detection_roi(detections, frame_w, frame_h)
+            
+            # PHASE 1: Boost confidence for edge detections
+            detections = self._boost_edge_confidence(detections, frame_w, frame_h)
+
             if len(ids) > 0:
                 ids_array = np.array(ids) if not isinstance(ids, np.ndarray) else ids
                 detections.tracker_id = ids_array.astype(int)
@@ -359,9 +626,11 @@ class SupervisionTracker:
         with session_guard:
             with self._count_lock:
                 if self._line_zone is not None:
-                    crossed_in, crossed_out = self._line_zone.trigger(detections)
-                    line_in_count = int(np.count_nonzero(crossed_in))
-                    line_out_count = int(np.count_nonzero(crossed_out))
+                    # PHASE 2: Motion-aware crossing validation
+                    # Combines primary LineZone detection with track momentum analysis
+                    line_in_count, line_out_count = self._validate_crossing_with_motion(
+                        self._line_zone, detections, frame_w, frame_h
+                    )
 
                     in_attr, out_attr = self._determine_in_out_direction()
                     if in_attr == "in_count" and out_attr == "out_count":
