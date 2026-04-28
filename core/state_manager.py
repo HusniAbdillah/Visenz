@@ -262,6 +262,19 @@ class StateManager:
             session_id = self._session_id
             granularity = str(trend_granularity).lower()
             effective_interval_minutes = 1440 if granularity == "day" else int(interval_minutes)
+            # For day-granularity, align day buckets to the timestamp of the last recorded event
+            align_start = False
+            if granularity == "day":
+                last_event = self._analytics_db.fetch_last_event_time(session_id)
+                if last_event:
+                    # start_at remains last_reset_at for filtering, but buckets will align to last_event
+                    align_start = True
+                    bucket_anchor = last_event
+                else:
+                    bucket_anchor = start_at
+            else:
+                bucket_anchor = start_at
+
         return {
             "interval_minutes": effective_interval_minutes,
             "trend_granularity": granularity,
@@ -273,6 +286,7 @@ class StateManager:
                 session_id=session_id,
                 interval_minutes=interval_minutes,
                 granularity=granularity,
+                align_start=align_start if granularity == "day" else False,
             ),
             "camera_summary": self._analytics_db.fetch_camera_summary(start_at, session_id=session_id),
         }

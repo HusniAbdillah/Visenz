@@ -11,7 +11,7 @@ import logging
 import sqlite3
 from collections import defaultdict
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 import pytz
@@ -169,6 +169,7 @@ class AnalyticsDB:
         session_id: str,
         interval_minutes: int = 15,
         granularity: str = "interval",
+        align_start: bool = False,
     ) -> List[Dict[str, Any]]:
         granularity = str(granularity).lower()
         with self._connect() as conn:
@@ -187,7 +188,10 @@ class AnalyticsDB:
 
         for row in rows:
             if granularity == "day":
-                bucket = self._bucket_day(row["timestamp_wib"])
+                if align_start and start_at:
+                    bucket = self._bucket_relative_day(row["timestamp_wib"], start_at)
+                else:
+                    bucket = self._bucket_day(row["timestamp_wib"])
             else:
                 interval_minutes = max(1, int(interval_minutes))
                 bucket = self._bucket_timestamp(row["timestamp_wib"], interval_minutes)
@@ -214,6 +218,39 @@ class AnalyticsDB:
                 }
             )
         return ordered
+
+    def fetch_last_event_time(self, session_id: str) -> Optional[str]:
+        """Return the timestamp_wib of the most recent event for the session, or None."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT MAX(timestamp_wib) AS last_event FROM logs WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return row["last_event"]
+
+    def _bucket_relative_day(self, timestamp_wib: str, reference_wib: str) -> str:
+        """
+        Bucket a timestamp into 24-hour buckets anchored at reference_wib.
+
+        Example: reference_wib = '2026-04-28 10:30:00'
+        Buckets will be 'YYYY-MM-DD HH:MM:SS' where HH:MM:SS == 10:30:00 and
+        dates advance by 1 day.
+        """
+        try:
+            ts = datetime.strptime(timestamp_wib, "%Y-%m-%d %H:%M:%S")
+            ref = datetime.strptime(reference_wib, "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            # Fallback to day bucket
+            return self._bucket_day(timestamp_wib)
+
+        # Compute difference in days relative to reference, floor to integer days
+        delta = ts - ref
+        # number of full days since reference (can be negative)
+        days = int(delta.total_seconds() // 86400)
+        bucket_start = ref + timedelta(days=days)
+        return bucket_start.strftime("%Y-%m-%d %H:%M:%S")
 
     def fetch_camera_summary(self, start_at: str, session_id: str) -> List[Dict[str, Any]]:
         with self._connect() as conn:
