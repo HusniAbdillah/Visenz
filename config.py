@@ -59,6 +59,15 @@ CAMERA_INFERENCE_SIZE = 640  # Max resolution for inference (YOLOv8n optimal)
 CAMERA_BUFFER_SIZE = 1  # OpenCV buffer size (1 = no buffering, prevents Wi-Fi lag)
 CAMERA_CONNECT_TIMEOUT = 10  # Seconds to wait for camera connection
 CAMERA_READ_TIMEOUT = 5.0  # Seconds to wait per frame read
+RTSP_FFMPEG_CAPTURE_OPTIONS = (
+    "rtsp_transport;tcp|"
+    "fflags;nobuffer+discardcorrupt|"
+    "flags;low_delay|"
+    "max_delay;0|"
+    "analyzeduration;0|"
+    "probesize;32|"
+    "stimeout;5000000"
+)
 
 # Uniform capture profile for all cameras.
 # Keep enabled so every camera uses the same requested profile.
@@ -85,13 +94,16 @@ IOU_THRESHOLD = 0.45
 # - "cuda"     : NVIDIA GPU only
 # - "openvino" : Intel OpenVINO only
 # - "cpu"      : CPU only
-INFERENCE_BACKEND = os.environ.get("INFERENCE_BACKEND", "openvino").lower()
+INFERENCE_BACKEND = os.environ.get("INFERENCE_BACKEND", "auto").lower()
 CUDA_HALF = True
 INFERENCE_BATCH_SIZE = 3
-INFERENCE_BATCH_WAIT_SECONDS = 0.02
+INFERENCE_BATCH_WAIT_SECONDS = 0.01
+INFERENCE_RESULT_TIMEOUT_SECONDS = 4.0
 
 # Tracking & State Machine
-TRACK_PERSISTENCE = 30  # Frames to keep track after detection lost
+TRACK_PERSISTENCE = 45  # Keep lost IDs alive long enough for short Wi-Fi/occlusion gaps.
+BYTE_TRACK_TRACK_THRESH = 0.25
+BYTE_TRACK_MATCH_THRESH = 0.70
 LINE_CROSSING_THRESHOLD = 10  # Minimum pixels to cross the line to count
 DETECTION_MIN_CONSECUTIVE = 2  # Min frames to track before counting
 LINE_BUFFER_ZONE_PX = 20  # Deadzone around counting line to avoid jitter double-count

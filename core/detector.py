@@ -60,6 +60,7 @@ class VisionModel:
         self._running: bool = False
         self._batch_size: int = max(1, int(getattr(config, "INFERENCE_BATCH_SIZE", 3)))
         self._batch_wait_seconds: float = float(getattr(config, "INFERENCE_BATCH_WAIT_SECONDS", 0.02))
+        self._sync_inference_lock: threading.Lock = threading.Lock()
         self._initialize_model()
 
     def _initialize_model(self) -> None:
@@ -226,7 +227,8 @@ class VisionModel:
             if self._running and self._batch_worker is not None:
                 request = _InferenceRequest(frame=frame, conf=conf, iou=iou)
                 self._batch_queue.put(request)
-                if not request.event.wait(timeout=float(getattr(config, "VIDEO_CAPTURE_TIMEOUT", 5.0)) + 5.0):
+                timeout_seconds = float(getattr(config, "INFERENCE_RESULT_TIMEOUT_SECONDS", 4.0))
+                if not request.event.wait(timeout=timeout_seconds):
                     raise RuntimeError("Timed out waiting for batched GPU inference")
                 if request.error is not None:
                     raise RuntimeError(f"Inference failed: {request.error}") from request.error
@@ -234,7 +236,8 @@ class VisionModel:
                     raise RuntimeError("Inference returned no result")
                 return request.result
 
-            return self._run_single_inference(model, frame, conf=conf, iou=iou)
+            with self._sync_inference_lock:
+                return self._run_single_inference(model, frame, conf=conf, iou=iou)
 
         except Exception as e:
             logger.error("Inference failed: %s", str(e))

@@ -154,11 +154,16 @@ class SupervisionTracker:
             triggering_anchors=(sv.Position.CENTER,),
         )
 
+        # ByteTrack operates on the inference cadence, not the raw camera FPS.
+        # This preserves IDs through brief Wi-Fi jitter and lateral occlusion
+        # without keeping lost tracks alive so long that ghosts dominate.
+        effective_tracker_fps = max(1, int(round(float(config.CAMERA_FPS) / max(1, self.frame_skip))))
+
         self._byte_tracker = sv.ByteTrack(
-            track_activation_threshold=config.CONFIDENCE_THRESHOLD,
-            lost_track_buffer=max(int(getattr(config, "TRACK_PERSISTENCE", 30)) * 6, 180),
-            minimum_matching_threshold=max(0.65, float(config.IOU_THRESHOLD)),
-            frame_rate=config.CAMERA_FPS,
+            track_activation_threshold=float(getattr(config, "BYTE_TRACK_TRACK_THRESH", 0.25)),
+            lost_track_buffer=int(getattr(config, "TRACK_PERSISTENCE", 45)),
+            minimum_matching_threshold=float(getattr(config, "BYTE_TRACK_MATCH_THRESH", 0.70)),
+            frame_rate=effective_tracker_fps,
         )
 
         self._box_annotator = sv.BoxAnnotator(

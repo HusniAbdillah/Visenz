@@ -37,7 +37,16 @@ def parse_source(url: str):
 
 
 def _is_rtsp_source(source: str) -> bool:
-    return isinstance(source, str) and source.startswith("rtsp")
+    return isinstance(source, str) and source.startswith(("rtsp://", "rtsps://"))
+
+
+def _set_rtsp_capture_options() -> None:
+    """Apply low-latency FFmpeg options for Wi-Fi RTSP streams."""
+    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = getattr(
+        config,
+        "RTSP_FFMPEG_CAPTURE_OPTIONS",
+        "rtsp_transport;tcp|fflags;nobuffer+discardcorrupt|flags;low_delay|max_delay;0|analyzeduration;0|probesize;32|stimeout;5000000",
+    )
 
 
 class ThreadedVideoReader:
@@ -133,7 +142,7 @@ class ThreadedVideoReader:
             source = parse_source(self.camera_url)
 
             if _is_rtsp_source(str(source)):
-                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|stimeout;5000000|buffer_size;1048576"
+                _set_rtsp_capture_options()
             
             if isinstance(source, int):
                 self._cap = cv2.VideoCapture(source, cv2.CAP_DSHOW)
@@ -151,6 +160,13 @@ class ThreadedVideoReader:
 
             # Optimization settings
             self._cap.set(cv2.CAP_PROP_BUFFERSIZE, self._buffer_size)
+            if _is_rtsp_source(str(source)):
+                # Hint FFmpeg/OpenCV to fail fast on Wi-Fi stalls instead of
+                # building up buffered latency behind the reader thread.
+                if hasattr(cv2, "CAP_PROP_OPEN_TIMEOUT_MSEC"):
+                    self._cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 3000)
+                if hasattr(cv2, "CAP_PROP_READ_TIMEOUT_MSEC"):
+                    self._cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 1000)
 
             if getattr(config, "CAMERA_ENFORCE_UNIFORM_CAPTURE", True):
                 fourcc_code = str(getattr(config, "CAMERA_PREFERRED_FOURCC", "")).strip().upper()
@@ -230,7 +246,7 @@ class ThreadedVideoReader:
 
                 ret, frame = self._cap.read()
 
-                if not ret or frame is None:
+                if not ret or frame is None or frame.size == 0:
                     consecutive_failures += 1
                     
                     if consecutive_failures > self.MAX_CONSECUTIVE_FAILURES:
@@ -242,7 +258,7 @@ class ThreadedVideoReader:
                         self._handle_reconnect()
                         consecutive_failures = 0
                     else:
-                        time.sleep(0.01)
+                        time.sleep(0.005)
                     continue
 
                 consecutive_failures = 0
