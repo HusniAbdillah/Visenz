@@ -214,20 +214,21 @@ class SupervisionTracker:
         """
         if self.orientation == "vertical":
             x_pos = int(self.line_ratio * frame_w)
-            if self.in_direction in ["left_to_right", "right_to_left"]:
-                start = sv.Point(x=x_pos, y=0)
-                end = sv.Point(x=x_pos, y=frame_h)
-            else:
-                start = sv.Point(x=x_pos, y=0)
-                end = sv.Point(x=x_pos, y=frame_h)
+            # vertical line runs top->bottom by default; swap endpoints
+            # so the LineZone orientation matches the configured in_direction
+            start = sv.Point(x=x_pos, y=0)
+            end = sv.Point(x=x_pos, y=frame_h)
+            if self.in_direction == "right_to_left":
+                start, end = end, start
         else:
             y_pos = int(self.line_ratio * frame_h)
-            if self.in_direction in ["top_to_bottom", "bottom_to_top"]:
-                start = sv.Point(x=0, y=y_pos)
-                end = sv.Point(x=frame_w, y=y_pos)
-            else:
-                start = sv.Point(x=0, y=y_pos)
-                end = sv.Point(x=frame_w, y=y_pos)
+            # horizontal line runs left->right by default; swap endpoints
+            # when configured for bottom_to_top so annotations/direction
+            # align with the configured in_direction
+            start = sv.Point(x=0, y=y_pos)
+            end = sv.Point(x=frame_w, y=y_pos)
+            if self.in_direction == "bottom_to_top":
+                start, end = end, start
 
         return start, end
 
