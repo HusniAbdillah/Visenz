@@ -53,8 +53,8 @@ CAMERAS = [
 
 # Video Capture Configuration
 CAMERA_FPS = 15
-CAMERA_FRAME_WIDTH = 1280
-CAMERA_FRAME_HEIGHT = 720
+CAMERA_FRAME_WIDTH = 640
+CAMERA_FRAME_HEIGHT = 480
 CAMERA_INFERENCE_SIZE = 640  # Max resolution for inference (YOLOv8n optimal)
 CAMERA_BUFFER_SIZE = 1  # OpenCV buffer size (1 = no buffering, prevents Wi-Fi lag)
 CAMERA_CONNECT_TIMEOUT = 10  # Seconds to wait for camera connection
@@ -65,8 +65,7 @@ RTSP_FFMPEG_CAPTURE_OPTIONS = (
     "flags;low_delay|"
     "max_delay;0|"
     "analyzeduration;0|"
-    "probesize;32|"
-    "stimeout;5000000"
+    "probesize;32"
 )
 
 # Uniform capture profile for all cameras.
@@ -101,9 +100,9 @@ INFERENCE_BATCH_WAIT_SECONDS = 0.01
 INFERENCE_RESULT_TIMEOUT_SECONDS = 4.0
 
 # Tracking & State Machine
-TRACK_PERSISTENCE = 45  # Keep lost IDs alive long enough for short Wi-Fi/occlusion gaps.
+TRACK_PERSISTENCE = 60  # Keep lost IDs alive longer through lateral occlusion and Wi-Fi gaps.
 BYTE_TRACK_TRACK_THRESH = 0.25
-BYTE_TRACK_MATCH_THRESH = 0.70
+BYTE_TRACK_MATCH_THRESH = 0.80  # Tighten matching to reduce ID switches in dense crowds.
 LINE_CROSSING_THRESHOLD = 10  # Minimum pixels to cross the line to count
 DETECTION_MIN_CONSECUTIVE = 2  # Min frames to track before counting
 LINE_BUFFER_ZONE_PX = 20  # Deadzone around counting line to avoid jitter double-count
@@ -136,6 +135,7 @@ OPENVINO_XML_PATH = os.environ.get(
 )
 
 # Visualization & Debug
+# ENABLE_DEBUG_DISPLAY = False  # Disable cv2.imshow() for production to avoid UI blocking.
 ENABLE_DEBUG_DISPLAY = True  # Show cv2.imshow() with bboxes, lines, IDs
 DEBUG_DISPLAY_WINDOW_WIDTH = 960
 DEBUG_DISPLAY_WINDOW_HEIGHT = 540

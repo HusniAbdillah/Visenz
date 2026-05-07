@@ -151,7 +151,7 @@ class SupervisionTracker:
         self._line_zone = sv.LineZone(
             start=line_start,
             end=line_end,
-            triggering_anchors=(sv.Position.CENTER,),
+            triggering_anchors=(sv.Position.TOP_CENTER,),
         )
 
         # ByteTrack operates on the inference cadence, not the raw camera FPS.

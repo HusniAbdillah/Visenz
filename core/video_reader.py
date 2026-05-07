@@ -45,7 +45,7 @@ def _set_rtsp_capture_options() -> None:
     os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = getattr(
         config,
         "RTSP_FFMPEG_CAPTURE_OPTIONS",
-        "rtsp_transport;tcp|fflags;nobuffer+discardcorrupt|flags;low_delay|max_delay;0|analyzeduration;0|probesize;32|stimeout;5000000",
+        "rtsp_transport;tcp|fflags;nobuffer+discardcorrupt|flags;low_delay|max_delay;0|analyzeduration;0|probesize;32",
     )
 
 
@@ -80,7 +80,8 @@ class ThreadedVideoReader:
         """
         self.camera_id: str = camera_id
         self.camera_url: str = camera_url
-        self._buffer_size: int = buffer_size
+        self._buffer_size: int = 1 if buffer_size is None else max(1, int(buffer_size))
+        self._is_rtsp_source: bool = False
 
         self._cap: Optional[cv2.VideoCapture] = None
         self._latest_frame: Optional[np.ndarray] = None
@@ -140,8 +141,9 @@ class ThreadedVideoReader:
             )
 
             source = parse_source(self.camera_url)
+            self._is_rtsp_source = _is_rtsp_source(str(source))
 
-            if _is_rtsp_source(str(source)):
+            if self._is_rtsp_source:
                 _set_rtsp_capture_options()
             
             if isinstance(source, int):
@@ -159,8 +161,8 @@ class ThreadedVideoReader:
                 return False
 
             # Optimization settings
-            self._cap.set(cv2.CAP_PROP_BUFFERSIZE, self._buffer_size)
-            if _is_rtsp_source(str(source)):
+            self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            if self._is_rtsp_source:
                 # Hint FFmpeg/OpenCV to fail fast on Wi-Fi stalls instead of
                 # building up buffered latency behind the reader thread.
                 if hasattr(cv2, "CAP_PROP_OPEN_TIMEOUT_MSEC"):
@@ -261,6 +263,9 @@ class ThreadedVideoReader:
                         time.sleep(0.005)
                     continue
 
+                if self._is_rtsp_source:
+                    frame = self._drain_stale_frames(frame)
+
                 consecutive_failures = 0
                 self._connected = True
 
@@ -284,6 +289,25 @@ class ThreadedVideoReader:
                 )
                 self._handle_reconnect()
                 consecutive_failures = 0
+
+    def _drain_stale_frames(self, frame: np.ndarray) -> np.ndarray:
+        """Drain a few buffered RTSP frames and keep the newest one only."""
+        latest_frame = frame
+        if self._cap is None:
+            return latest_frame
+
+        for _ in range(3):
+            try:
+                if not self._cap.grab():
+                    break
+                ok, drained_frame = self._cap.retrieve()
+                if not ok or drained_frame is None or drained_frame.size == 0:
+                    break
+                latest_frame = drained_frame
+            except Exception:
+                break
+
+        return latest_frame
 
     def _handle_reconnect(self) -> None:
         """
