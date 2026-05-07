@@ -28,6 +28,7 @@ if _cuda_visible and not all(c.isdigit() or c in ',-' for c in _cuda_visible):
     os.environ.pop('CUDA_VISIBLE_DEVICES', None)
 
 logger = logging.getLogger(__name__)
+_LEGACY_TRACKER_ARG_KEYS = ("max_age", "track_buffer", "min_hits")
 
 
 @dataclass
@@ -116,6 +117,7 @@ class VisionModel:
             pass
 
         self.model = YOLO(model_path, task="detect")
+        self._sanitize_legacy_tracker_overrides(self.model)
         self.device = "cuda:0"
         self._predict_device = "cuda:0"
         self._running = True
@@ -154,6 +156,7 @@ class VisionModel:
             raise RuntimeError(f"OpenVINO model directory not found: {ov_model_dir}")
 
         self.model = YOLO(str(ov_model_dir), task="detect")
+        self._sanitize_legacy_tracker_overrides(self.model)
         target = str(getattr(config, "OPENVINO_DEVICE", "GPU")).strip().upper()
         self.device = f"openvino:{target.lower()}"
         # Keep runtime predictable across Ultralytics/OpenVINO versions.
@@ -163,6 +166,7 @@ class VisionModel:
 
     def _initialize_cpu(self, model_path: str) -> None:
         self.model = YOLO(model_path, task="detect")
+        self._sanitize_legacy_tracker_overrides(self.model)
         self.device = "cpu"
         self._predict_device = "cpu"
         self._running = False
@@ -243,6 +247,68 @@ class VisionModel:
             logger.error("Inference failed: %s", str(e))
             raise RuntimeError(f"Inference failed: {str(e)}")
 
+    def _sanitize_legacy_tracker_overrides(self, model: YOLO) -> Dict[str, Any]:
+        """Remove legacy ByteTrack kwargs that may leak into Ultralytics predict args."""
+        removed: Dict[str, Any] = {}
+
+        def _strip_from_obj(obj: Any) -> None:
+            if obj is None:
+                return
+
+            if isinstance(obj, dict):
+                for key in _LEGACY_TRACKER_ARG_KEYS:
+                    if key in obj:
+                        removed[key] = obj.pop(key)
+                return
+
+            # argparse.Namespace / SimpleNamespace-like objects
+            obj_dict = getattr(obj, "__dict__", None)
+            if isinstance(obj_dict, dict):
+                for key in _LEGACY_TRACKER_ARG_KEYS:
+                    if key in obj_dict:
+                        removed[key] = obj_dict.pop(key)
+
+        _strip_from_obj(getattr(model, "overrides", None))
+        predictor = getattr(model, "predictor", None)
+        _strip_from_obj(getattr(predictor, "args", None))
+
+        if removed:
+            logger.warning(
+                "Removed unsupported legacy tracker args from YOLO runtime config: %s",
+                ", ".join(sorted(removed.keys())),
+            )
+        return removed
+
+    def _is_legacy_tracker_arg_error(self, exc: BaseException) -> bool:
+        message = str(exc)
+        if "not a valid YOLO argument" not in message:
+            return False
+        return any(arg in message for arg in _LEGACY_TRACKER_ARG_KEYS)
+
+    def _predict_with_recovery(self, model: YOLO, source: Any, conf: float, iou: float) -> Any:
+        """Run predict and retry once if legacy tracker args are injected into runtime state."""
+        self._sanitize_legacy_tracker_overrides(model)
+
+        predict_kwargs = {
+            "conf": conf,
+            "iou": iou,
+            "imgsz": self.inference_size,
+            "device": self._predict_device,
+            "half": bool(getattr(config, "CUDA_HALF", True) and self.device.startswith("cuda")),
+            "verbose": False,
+        }
+
+        try:
+            return model.predict(source, **predict_kwargs)
+        except Exception as exc:
+            if not self._is_legacy_tracker_arg_error(exc):
+                raise
+
+            # Runtime state can be repopulated by backend wrappers; sanitize again and retry once.
+            self._sanitize_legacy_tracker_overrides(model)
+            logger.warning("Retrying YOLO predict after removing legacy tracker args")
+            return model.predict(source, **predict_kwargs)
+
     def _batch_inference_loop(self) -> None:
         """Collect pending requests and execute them as a small batch on CUDA."""
         while self._running:
@@ -270,15 +336,7 @@ class VisionModel:
                 if model is None:
                     raise RuntimeError("Model not initialized")
 
-                results = model.predict(
-                    frames,
-                    conf=conf,
-                    iou=iou,
-                    imgsz=self.inference_size,
-                    device=self._predict_device,
-                    half=bool(getattr(config, "CUDA_HALF", True) and self.device.startswith("cuda")),
-                    verbose=False,
-                )
+                results = self._predict_with_recovery(model, frames, conf=conf, iou=iou)
 
                 if not isinstance(results, list):
                     results = [results]
@@ -295,15 +353,7 @@ class VisionModel:
 
     def _run_single_inference(self, model: YOLO, frame: np.ndarray, conf: float, iou: float) -> Dict[str, Any]:
         """Fallback synchronous inference path used when the batch worker is unavailable."""
-        results = model.predict(
-            frame,
-            conf=conf,
-            iou=iou,
-            imgsz=self.inference_size,
-            device=self._predict_device,
-            half=bool(getattr(config, "CUDA_HALF", True) and self.device.startswith("cuda")),
-            verbose=False,
-        )
+        results = self._predict_with_recovery(model, frame, conf=conf, iou=iou)
 
         result = results[0] if isinstance(results, list) and results else results
         return self._result_to_detection_dict(result, frame)
