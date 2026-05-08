@@ -261,19 +261,14 @@ class StateManager:
             start_at = self._last_reset_at
             session_id = self._session_id
             granularity = str(trend_granularity).lower()
-            effective_interval_minutes = 1440 if granularity == "day" else int(interval_minutes)
-            # For day-granularity, align day buckets to the timestamp of the last recorded event
-            align_start = False
-            if granularity == "day":
-                last_event = self._analytics_db.fetch_last_event_time(session_id)
-                if last_event:
-                    # start_at remains last_reset_at for filtering, but buckets will align to last_event
-                    align_start = True
-                    bucket_anchor = last_event
-                else:
-                    bucket_anchor = start_at
-            else:
-                bucket_anchor = start_at
+
+        # Determine effective interval based on granularity
+        if granularity == "hour":
+            effective_interval_minutes = 60
+        elif granularity == "day":
+            effective_interval_minutes = 1440
+        else:
+            effective_interval_minutes = int(interval_minutes)
 
         return {
             "interval_minutes": effective_interval_minutes,
@@ -281,16 +276,16 @@ class StateManager:
             "start_at": start_at,
             "session_id": session_id,
             "timezone": "Asia/Jakarta",
+            "now": self._wib_now(),
             "time_series": self._analytics_db.fetch_time_series(
                 start_at,
                 session_id=session_id,
                 interval_minutes=interval_minutes,
                 granularity=granularity,
-                align_start=align_start if granularity == "day" else False,
+                align_start=False,
             ),
             "camera_summary": self._analytics_db.fetch_camera_summary(start_at, session_id=session_id),
         }
-
     def get_event_logs(self, only_current_session: bool = True) -> Dict[str, Any]:
         with self._lock:
             session_id = self._session_id

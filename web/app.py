@@ -251,6 +251,21 @@ def api_stats():
             'camera_summary': analytics.get('camera_summary', []),
             'generated_at': _wib_now(),
         }
+        # Add time metadata
+        result['now'] = analytics.get('now', _wib_now())
+        result['started_at'] = analytics.get('start_at', stats.get('last_reset_at'))
+        
+        # Add consistency validation
+        time_series_total_in = sum(item.get('total_in', 0) for item in analytics.get('time_series', []))
+        time_series_total_out = sum(item.get('total_out', 0) for item in analytics.get('time_series', []))
+        result['data_consistency'] = {
+            'expected_total_in': stats['total_in'],
+            'expected_total_out': stats['total_out'],
+            'actual_time_series_in': time_series_total_in,
+            'actual_time_series_out': time_series_total_out,
+            'match': (time_series_total_in == stats['total_in'] and 
+                     time_series_total_out == stats['total_out']),
+        }
 
         if camera_manager is not None:
             try:

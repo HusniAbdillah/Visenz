@@ -172,6 +172,11 @@ class AnalyticsDB:
         align_start: bool = False,
     ) -> List[Dict[str, Any]]:
         granularity = str(granularity).lower()
+        
+        # For hourly granularity, delegate to hourly fetcher
+        if granularity == "hour":
+            return self.fetch_time_series_hourly(start_at, session_id)
+        
         with self._connect() as conn:
             rows = conn.execute(
                 """
@@ -188,10 +193,7 @@ class AnalyticsDB:
 
         for row in rows:
             if granularity == "day":
-                if align_start and start_at:
-                    bucket = self._bucket_relative_day(row["timestamp_wib"], start_at)
-                else:
-                    bucket = self._bucket_day(row["timestamp_wib"])
+                bucket = self._bucket_day(row["timestamp_wib"])
             else:
                 interval_minutes = max(1, int(interval_minutes))
                 bucket = self._bucket_timestamp(row["timestamp_wib"], interval_minutes)
@@ -205,9 +207,9 @@ class AnalyticsDB:
         for bucket in sorted(buckets.keys()):
             item = buckets[bucket]
             if granularity == "day":
-                bucket_label = bucket[:10]
+                bucket_label = bucket[:10]  # YYYY-MM-DD
             else:
-                bucket_label = bucket[11:16]
+                bucket_label = bucket[11:16]  # HH:MM
             ordered.append(
                 {
                     "interval_start": bucket,
@@ -230,9 +232,54 @@ class AnalyticsDB:
             return None
         return row["last_event"]
 
+    def fetch_time_series_hourly(
+        self,
+        start_at: str,
+        session_id: str,
+    ) -> List[Dict[str, Any]]:
+        """Fetch hourly breakdown of IN/OUT for current day."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT timestamp_wib, direction
+                FROM logs
+                WHERE timestamp_wib >= ?
+                  AND session_id = ?
+                ORDER BY timestamp_wib ASC
+                """,
+                (start_at, session_id),
+            ).fetchall()
+
+        buckets: Dict[str, Dict[str, Any]] = defaultdict(lambda: {"total_in": 0, "total_out": 0})
+
+        for row in rows:
+            bucket = self._bucket_hour(row["timestamp_wib"])
+            bucket_data = buckets[bucket]
+            if row["direction"] == "IN":
+                bucket_data["total_in"] += 1
+            else:
+                bucket_data["total_out"] += 1
+
+        ordered: List[Dict[str, Any]] = []
+        for bucket in sorted(buckets.keys()):
+            item = buckets[bucket]
+            hour_str = bucket[11:13]  # HH from "YYYY-MM-DD HH:00:00"
+            bucket_label = f"{hour_str}:00"
+            ordered.append(
+                {
+                    "interval_start": bucket,
+                    "bucket_label": bucket_label,
+                    "total_in": item["total_in"],
+                    "total_out": item["total_out"],
+                    "net_in": item["total_in"] - item["total_out"],
+                }
+            )
+        return ordered
+
     def _bucket_relative_day(self, timestamp_wib: str, reference_wib: str) -> str:
         """
-        Bucket a timestamp into 24-hour buckets anchored at reference_wib.
+        [DEPRECATED] Bucket a timestamp into 24-hour buckets anchored at reference_wib.
+        Use _bucket_day() instead for calendar-based bucketing.
 
         Example: reference_wib = '2026-04-28 10:30:00'
         Buckets will be 'YYYY-MM-DD HH:MM:SS' where HH:MM:SS == 10:30:00 and
@@ -252,6 +299,13 @@ class AnalyticsDB:
         bucket_start = ref + timedelta(days=days)
         return bucket_start.strftime("%Y-%m-%d %H:%M:%S")
 
+    def _bucket_hour(self, timestamp_wib: str) -> str:
+        """Bucket timestamp into hourly buckets (YYYY-MM-DD HH:00:00)."""
+        try:
+            ts = datetime.strptime(timestamp_wib, "%Y-%m-%d %H:%M:%S")
+            return ts.replace(minute=0, second=0, microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return timestamp_wib
     def fetch_camera_summary(self, start_at: str, session_id: str) -> List[Dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
@@ -311,6 +365,7 @@ class AnalyticsDB:
         return bucket.strftime("%Y-%m-%d %H:%M:%S")
 
     def _bucket_day(self, timestamp: str) -> str:
+        """Bucket timestamp to calendar day start (YYYY-MM-DD 00:00:00)."""
         parsed = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
         bucket = parsed.replace(hour=0, minute=0, second=0, microsecond=0)
         return bucket.strftime("%Y-%m-%d %H:%M:%S")
