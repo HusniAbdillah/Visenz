@@ -10,27 +10,27 @@ PROJECT_ROOT = Path(__file__).parent
 
 # CAMERAS - WiFi IP cameras at distance (update IP, username, password)
 CAMERAS = [
-    # {
-    #     "id": "Cam_Pintu_Samping_Kiri",
-    #     "url": "1",
-    #     "orientation": "vertical",  # 'vertical' or 'horizontal'
-    #     "line_ratio": 0.5,  # 0.0 to 1.0 (50% of width for vertical, 50% of height for horizontal)
-    #     "in_direction": "left_to_right",  # Options: 'left_to_right', 'right_to_left', 'top_to_bottom', 'bottom_to_top'
-    #     "frame_skip": 3,  # Process every Nth frame for inference (1=every frame, 3=every 3rd)
-    #     "enabled": True,
-    # },
-    # {
-    #     "id": "Cam_Pintu_Masuk_Depan",
-    #     "url": "rtsp://ijfcda:IPBJobFair26@10.2.241.4:554/stream1",
-    #     "orientation": "vertical",  # 'vertical' or 'horizontal'
-    #     "line_ratio": 0.5,  # 0.0 to 1.0 (50% of width for vertical, 50% of height for horizontal)
-    #     "in_direction": "left_to_right",  # Options: 'left_to_right', 'right_to_left', 'top_to_bottom', 'bottom_to_top'
-    #     "frame_skip": 3,  # Process every Nth frame for inference (1=every frame, 3=every 3rd)
-    #     "enabled": True,
-    # },
     {
-        "id": "Cam_Pintu_Samping_Kanan",
-        "url": "rtsp://ijfkanan:IJFCDA2026@10.2.240.198:554/stream1",
+        "id": "Cam_Pintu_Keluar_Samping_Kiri",
+        "url": "rtsp://ijfkiri:IJFCDAKiri26@10.2.241.184:554/stream2",
+        "orientation": "vertical",  # 'vertical' or 'horizontal'
+        "line_ratio": 0.5,  # 0.0 to 1.0 (50% of width for vertical, 50% of height for horizontal)
+        "in_direction": "left_to_right",  # Options: 'left_to_right', 'right_to_left', 'top_to_bottom', 'bottom_to_top'
+        "frame_skip": 3,  # Process every Nth frame for inference (1=every frame, 3=every 3rd)
+        "enabled": True,
+    },
+    {
+        "id": "Cam_Pintu_Masuk_Depan",
+        "url": "rtsp://ijfcda:IPBJobFair26@10.2.241.4:554/stream2",
+        "orientation": "vertical",  # 'vertical' or 'horizontal'
+        "line_ratio": 0.5,  # 0.0 to 1.0 (50% of width for vertical, 50% of height for horizontal)
+        "in_direction": "left_to_right",  # Options: 'left_to_right', 'right_to_left', 'top_to_bottom', 'bottom_to_top'
+        "frame_skip": 3,  # Process every Nth frame for inference (1=every frame, 3=every 3rd)
+        "enabled": True,
+    },
+    {
+        "id": "Cam_Pintu_Keluar_Samping_Kanan",
+        "url": "rtsp://ijfkanan:IJFCDA2026@10.2.240.198:554/stream2",
         "orientation": "vertical",  # 'vertical' or 'horizontal'
         "line_ratio": 0.5,  # 0.0 to 1.0 (50% of width for vertical, 50% of height for horizontal)
         "in_direction": "left_to_right",  # Options: 'left_to_right', 'right_to_left', 'top_to_bottom', 'bottom_to_top'
