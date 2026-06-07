@@ -1,6 +1,8 @@
 """
-Configuration: 3 WiFi Cameras (Distant Setup)
-Optimized for distant WiFi IP cameras with high latency, low signal, and frequent dropouts.
+Default runtime configuration for Edge Vision Counter.
+
+This file ships with sample camera entries for a distant WiFi / RTSP setup.
+Replace the URLs, credentials, and enable flags with your own deployment values.
 """
 
 import os
@@ -8,36 +10,37 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent
 
-# CAMERAS - WiFi IP cameras at distance (update IP, username, password)
+# Sample camera entries for distant WiFi / RTSP sources.
+# Update the URL, credentials, and enabled flag before production use.
 CAMERAS = [
     {
         "id": "Cam_Pintu_Keluar_Samping_Kiri",
         "url": "rtsp://ijfkiri:IJFCDAKiri26@10.2.241.184:554/stream2",
-        "orientation": "vertical",  # 'vertical' or 'horizontal'
-        "line_ratio": 0.5,  # 0.0 to 1.0 (50% of width for vertical, 50% of height for horizontal)
-        "in_direction": "left_to_right",  # Options: 'left_to_right', 'right_to_left', 'top_to_bottom', 'bottom_to_top'
-        "frame_skip": 3,  # Process every Nth frame for inference (1=every frame, 3=every 3rd)
+        "orientation": "vertical",  # Vertical line crossing on the x-axis.
+        "line_ratio": 0.5,  # 0.0 to 1.0; 0.5 places the line in the middle.
+        "in_direction": "left_to_right",  # IN/OUT direction used by the counter.
+        "frame_skip": 3,  # Inference cadence: process every 3rd frame.
         "enabled": False,
     },
     {
         "id": "Cam_Pintu_Masuk_Depan",
         "url": "rtsp://ijfcda:IPBJobFair26@10.2.241.4:554/stream2",
-        "orientation": "vertical",  # 'vertical' or 'horizontal'
-        "line_ratio": 0.5,  # 0.0 to 1.0 (50% of width for vertical, 50% of height for horizontal)
-        "in_direction": "left_to_right",  # Options: 'left_to_right', 'right_to_left', 'top_to_bottom', 'bottom_to_top'
-        "frame_skip": 3,  # Process every Nth frame for inference (1=every frame, 3=every 3rd)
+        "orientation": "vertical",  # Vertical line crossing on the x-axis.
+        "line_ratio": 0.5,  # 0.0 to 1.0; 0.5 places the line in the middle.
+        "in_direction": "left_to_right",  # IN/OUT direction used by the counter.
+        "frame_skip": 3,  # Inference cadence: process every 3rd frame.
         "enabled": False,
     },
     {
         "id": "Cam_Pintu_Keluar_Samping_Kanan",
         "url": "rtsp://ijfkanan:IJFCDA2026@10.2.240.198:554/stream2",
-        "orientation": "vertical",  # 'vertical' or 'horizontal'
-        "line_ratio": 0.5,  # 0.0 to 1.0 (50% of width for vertical, 50% of height for horizontal)
-        "in_direction": "left_to_right",  # Options: 'left_to_right', 'right_to_left', 'top_to_bottom', 'bottom_to_top'
-        "frame_skip": 3,  # Process every Nth frame for inference (1=every frame, 3=every 3rd)
+        "orientation": "vertical",  # Vertical line crossing on the x-axis.
+        "line_ratio": 0.5,  # 0.0 to 1.0; 0.5 places the line in the middle.
+        "in_direction": "left_to_right",  # IN/OUT direction used by the counter.
+        "frame_skip": 3,  # Inference cadence: process every 3rd frame.
         "enabled": False,
     },
-    # Add more cameras here with the same structure:
+    # Example local HTTP stream; replace with your own source before enabling.
     {
         "id": "Cam_Ruang_Belakang",
         "url": "http://192.168.68.128:8080/video",
@@ -45,18 +48,18 @@ CAMERAS = [
         "line_ratio": 0.4,
         "in_direction": "left_to_right",
         "frame_skip": 3,
-        "enabled": True,
+        "enabled": False,
     },
 ]
 
-# Video capture - optimized for distant WiFi
+# Video capture defaults for distant WiFi / RTSP sources
 CAMERA_FPS = 10
 CAMERA_FRAME_WIDTH = 640
 CAMERA_FRAME_HEIGHT = 480
 CAMERA_INFERENCE_SIZE = 640
-CAMERA_BUFFER_SIZE = 1
-CAMERA_CONNECT_TIMEOUT = 25
-CAMERA_READ_TIMEOUT = 12.0
+CAMERA_BUFFER_SIZE = 1  # Keep only the most recent frame.
+CAMERA_CONNECT_TIMEOUT = 25  # Seconds to wait for initial connection.
+CAMERA_READ_TIMEOUT = 12.0  # Seconds to wait for frame reads.
 
 RTSP_FFMPEG_CAPTURE_OPTIONS = (
     "rtsp_transport;tcp|"
@@ -68,7 +71,7 @@ RTSP_FFMPEG_CAPTURE_OPTIONS = (
     "rtsp_transport;tcp"
 )
 
-CAMERA_ENFORCE_UNIFORM_CAPTURE = True
+CAMERA_ENFORCE_UNIFORM_CAPTURE = True  # Normalize camera capture settings when possible.
 CAMERA_PREFERRED_FOURCC = "MJPG"
 CAMERA_DISABLE_AUTO_ZOOM = True
 
@@ -79,7 +82,7 @@ FRAME_NORMALIZATION_HEIGHT = 480
 
 # Model configuration
 MODEL_NAME = "yolov8n"
-MODEL_TRACK_CLASS = 0
+MODEL_TRACK_CLASS = 0  # COCO class index for person.
 CONFIDENCE_THRESHOLD = 0.30
 IOU_THRESHOLD = 0.40
 
@@ -94,7 +97,7 @@ INFERENCE_BATCH_SIZE = 3
 INFERENCE_BATCH_WAIT_SECONDS = 0.01
 INFERENCE_RESULT_TIMEOUT_SECONDS = 4.0
 
-# Tracking - aggressive for WiFi dropout resilience
+# Tracking tuned for WiFi dropout resilience.
 TRACK_PERSISTENCE = 120
 BYTE_TRACK_TRACK_THRESH = 0.35
 BYTE_TRACK_MATCH_THRESH = 0.75
@@ -110,21 +113,21 @@ TRACK_STATE_STALE_FRAMES = 300
 # Threading & performance
 MAX_CONCURRENT_INFERENCE = 1
 VIDEO_CAPTURE_TIMEOUT = 12.0
-FRAME_SKIP_DEFAULT = 3
+FRAME_SKIP_DEFAULT = 3  # Baseline inference cadence for cameras without an explicit value.
 TARGET_FPS_PER_CAMERA = 10
 
-# Web server
+# Web server defaults
 FLASK_HOST = "0.0.0.0"
 FLASK_PORT = 5000
-SSE_UPDATE_INTERVAL = 0.25
+SSE_UPDATE_INTERVAL = 0.25  # Real-time updates at 250 ms intervals.
 FLASK_DEBUG = False
-ADMIN_RESET_PASSWORD = os.environ.get("ADMIN_RESET_PASSWORD", "admin")
+ADMIN_RESET_PASSWORD = os.environ.get("ADMIN_RESET_PASSWORD", "admin")  # Default password for POST /api/reset.
 
-# OpenVINO (optional GPU)
+# OpenVINO backend options
 USE_OPENVINO = False
 OPENVINO_DEVICE = "CPU"
 OPENVINO_COMPILE_OPTIMIZATION = "LATENCY"
-OPENVINO_AUTO_EXPORT = False
+OPENVINO_AUTO_EXPORT = False  # Keep disabled because the shipped IR model already exists.
 OPENVINO_XML_PATH = os.environ.get(
     "OPENVINO_XML_PATH",
     str(PROJECT_ROOT / f"{MODEL_NAME}_openvino_model" / f"{MODEL_NAME}.xml"),
