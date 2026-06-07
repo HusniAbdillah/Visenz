@@ -1,12 +1,13 @@
 # ByteTrack configuration for edge-vision-counter
-# Enhanced for Wi-Fi IP camera scenarios with lag tolerance
+# Tuned for full-body crowd counting over Wi-Fi RTSP links.
+# Baseline assumes ~30 FPS source with frame skipping upstream. If the
+# effective inference FPS falls to 10-15, increase track_buffer toward
+# 45-60 to preserve similar wall-clock retention for short occlusions.
 
 tracker_type: bytetrack
-track_high_thresh: 0.25       # First-stage match threshold
-track_low_thresh: 0.1         # Second-stage threshold for low-score matches
-new_track_thresh: 0.25        # Start new track threshold
-track_buffer: 90              # Buffer for unmatched tracks (3 sec occlusion at 30 FPS)
-match_thresh: 0.8             # Matching threshold for second association
-max_age: 90                    # Maximum age for unmatched track (3 seconds at 30 FPS)
-min_hits: 3                    # Minimum consecutive positive matches for a new track
+track_high_thresh: 0.25       # Equivalent to track_thresh: keep person detections reasonably strict
+track_low_thresh: 0.10        # Second-stage recovery after partial occlusion
+new_track_thresh: 0.35        # Require a more confident confirmation before spawning a new ID
+track_buffer: 30              # Enough retention for brief occlusion at 30 FPS baseline
+match_thresh: 0.70            # Slightly stricter matching to reduce ID swaps in dense crossings
 fuse_score: True

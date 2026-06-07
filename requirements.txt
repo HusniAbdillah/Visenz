@@ -1,9 +1,17 @@
-ultralytics>=8.0.0
+--extra-index-url https://download.pytorch.org/whl/cu124
+
+ultralytics>=8.4.33
 opencv-python>=4.8.0
 opencv-contrib-python>=4.8.0
-openvino>=2023.0.0
-openvino-dev>=2023.0.0
+openvino>=2024.6.0
+openvino-dev>=2024.6.0
 flask>=2.3.0
-numpy>=1.24.0
-torch>=2.0.0
-torchvision>=0.15.0
+numpy>=1.26.0,<2.0.0
+torch==2.11.0
+torchvision==0.26.0
+torchaudio==2.11.0
+supervision[desktop]>=0.19.0
+pandas>=2.2.2
+pytz>=2024.1
+pygrabber
+zeroconf>=0.132.2

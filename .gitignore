@@ -132,6 +132,7 @@ dmypy.json
 *.md
 
 !README.md
+*.json
 
 # YOLOv8 / OpenCV
 *.pt
@@ -152,3 +153,7 @@ logs/
 temp/
 cache/
 .cache/
+
+*.db
+
+/docs

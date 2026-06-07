@@ -1,24 +1,43 @@
 """
-Flask web server with Server-Sent Events (SSE) for real-time aggregated count updates.
-Provides REST endpoints for system health, aggregated stats, and per-camera stats.
-Multi-camera dashboard support via vanilla JS with dynamic camera cards.
+Flask web server with Server-Sent Events (SSE) and Admin APIs for edge-vision-counter V2.
+Provides REST endpoints for system health, aggregated stats, calibration, and reset.
+Multi-camera dashboard support with real-time SSE updates.
 """
 
-import logging
+import atexit
+import csv
 import json
+import logging
+import importlib
+import io
+import math
+import socket
 import time
-from functools import wraps
-from typing import Iterator
-from flask import Flask, render_template, Response, jsonify
+from collections import defaultdict
+from datetime import datetime, timedelta
+from typing import Iterator, Optional
+from flask import Flask, render_template, Response, jsonify, request
+import pytz
 
 import config
+from core.state_manager import StateManager
 
 logger = logging.getLogger(__name__)
+WIB_TZ = pytz.timezone("Asia/Jakarta")
 
 app = Flask(__name__, template_folder='templates')
 app.config['JSON_SORT_KEYS'] = False
+app.config['TEMPLATES_AUTO_RELOAD'] = True
+app.jinja_env.auto_reload = True
 
 camera_manager = None
+state_manager: Optional[StateManager] = None
+_mdns_zeroconf = None
+_mdns_service_info = None
+
+
+def _wib_now() -> str:
+    return datetime.now(WIB_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def set_camera_manager(manager) -> None:
@@ -34,10 +53,373 @@ def set_camera_manager(manager) -> None:
     logger.info("CameraManager instance set in Flask app")
 
 
+def set_state_manager(manager: StateManager) -> None:
+    """
+    Inject the StateManager instance into the Flask app.
+    Called from main.py during initialization.
+
+    Args:
+        manager: StateManager instance
+    """
+    global state_manager
+    state_manager = manager
+    logger.info("StateManager instance set in Flask app")
+
+
+def _resolve_host_ip() -> str:
+    """Resolve the primary non-loopback IPv4 address for mDNS advertisement."""
+    try:
+        host_name = socket.gethostname()
+        candidates = socket.gethostbyname_ex(host_name)[2]
+        for candidate in candidates:
+            if not candidate.startswith("127."):
+                return candidate
+    except Exception:
+        pass
+
+    return "127.0.0.1"
+
+
+def start_mdns_service(port: int = config.FLASK_PORT) -> bool:
+    """Advertise the dashboard as counter-gww.local over mDNS when available."""
+    global _mdns_zeroconf, _mdns_service_info
+
+    if not getattr(config, "MDNS_ENABLED", True):
+        return False
+
+    if _mdns_zeroconf is not None:
+        return True
+
+    try:
+        zeroconf_module = importlib.import_module("zeroconf")
+        Zeroconf = getattr(zeroconf_module, "Zeroconf")
+        ServiceInfo = getattr(zeroconf_module, "ServiceInfo")
+        host_ip = _resolve_host_ip()
+        service_name = f"{config.MDNS_SERVICE_NAME}._http._tcp.local."
+        host_name = f"{config.MDNS_HOSTNAME}.local."
+        info = ServiceInfo(
+            type_="_http._tcp.local.",
+            name=service_name,
+            addresses=[socket.inet_aton(host_ip)],
+            port=port,
+            properties={"path": "/"},
+            server=host_name,
+        )
+        zeroconf = Zeroconf()
+        zeroconf.register_service(info)
+        _mdns_zeroconf = zeroconf
+        _mdns_service_info = info
+        atexit.register(stop_mdns_service)
+        logger.info("mDNS service registered as http://%s.local:%d", config.MDNS_HOSTNAME, port)
+        return True
+    except Exception as exc:
+        logger.warning("Failed to register mDNS service: %s", str(exc))
+        return False
+
+
+def stop_mdns_service() -> None:
+    """Unregister the mDNS service if it was started."""
+    global _mdns_zeroconf, _mdns_service_info
+
+    if _mdns_zeroconf is None or _mdns_service_info is None:
+        return
+
+    try:
+        _mdns_zeroconf.unregister_service(_mdns_service_info)
+        _mdns_zeroconf.close()
+    except Exception as exc:
+        logger.debug("Error stopping mDNS service: %s", str(exc))
+    finally:
+        _mdns_zeroconf = None
+        _mdns_service_info = None
+
+
 @app.route('/')
 def index():
     """Serve the main dashboard HTML."""
     return render_template('index.html')
+
+
+@app.route('/history')
+def history():
+    """Serve the historical analytics dashboard."""
+    return render_template('history.html')
+
+
+def _history_bucket_label(timestamp_wib: str, granularity: str, interval_minutes: int = 15) -> str:
+    """Convert a WIB timestamp string into a display bucket label."""
+    parsed = datetime.strptime(timestamp_wib, "%Y-%m-%d %H:%M:%S")
+    granularity = str(granularity).lower()
+
+    if granularity == 'hour':
+        bucket = parsed.replace(minute=0, second=0, microsecond=0)
+        return bucket.strftime("%Y-%m-%d %H:00")
+
+    if granularity == 'interval':
+        interval_minutes = max(1, int(interval_minutes))
+        bucket_minute = (parsed.minute // interval_minutes) * interval_minutes
+        bucket = parsed.replace(minute=bucket_minute, second=0, microsecond=0)
+        return bucket.strftime("%Y-%m-%d %H:%M:%S")
+
+    bucket = parsed.replace(hour=0, minute=0, second=0, microsecond=0)
+    return bucket.strftime("%Y-%m-%d")
+
+
+def _history_matches_date(row, selected_date: str) -> bool:
+    """Return True when a history row belongs to the selected WIB date."""
+    if not selected_date:
+        return True
+
+    timestamp_wib = str(row.get('timestamp_wib', '') or '')
+    return timestamp_wib.startswith(selected_date)
+
+
+def _build_history_summary(rows, granularity: str = 'day', selected_date: str = '', interval_minutes: int = 15):
+    """Aggregate raw event rows into history analytics for the browser."""
+    totals = {
+        'total_in': 0,
+        'total_out': 0,
+        'current_inside': 0,
+        'total_events': 0,
+    }
+    time_buckets = defaultdict(lambda: {'total_in': 0, 'total_out': 0})
+    camera_buckets = defaultdict(lambda: {
+        'camera_id': '',
+        'total_in': 0,
+        'total_out': 0,
+        'total_events': 0,
+        'last_event_at': None,
+    })
+    session_ids = set()
+
+    for row in rows:
+        direction = str(row.get('direction', '')).upper()
+        camera_id = str(row.get('camera_id', 'unknown') or 'unknown')
+        timestamp_wib = str(row.get('timestamp_wib', '') or '')
+        session_id = str(row.get('session_id', '') or '')
+
+        if session_id:
+            session_ids.add(session_id)
+
+        totals['total_events'] += 1
+        if direction == 'IN':
+            totals['total_in'] += 1
+        elif direction == 'OUT':
+            totals['total_out'] += 1
+
+        if timestamp_wib:
+            bucket_label = _history_bucket_label(timestamp_wib, granularity, interval_minutes=interval_minutes)
+            bucket = time_buckets[bucket_label]
+            if direction == 'IN':
+                bucket['total_in'] += 1
+            elif direction == 'OUT':
+                bucket['total_out'] += 1
+
+        camera = camera_buckets[camera_id]
+        camera['camera_id'] = camera_id
+        camera['total_events'] += 1
+        if direction == 'IN':
+            camera['total_in'] += 1
+        elif direction == 'OUT':
+            camera['total_out'] += 1
+        if timestamp_wib and (camera['last_event_at'] is None or timestamp_wib > camera['last_event_at']):
+            camera['last_event_at'] = timestamp_wib
+
+    raw_current_inside = totals['total_in'] - totals['total_out']
+    totals['current_inside'] = max(0, raw_current_inside)
+
+    if granularity == 'interval' and selected_date:
+        timestamps = [str(row.get('timestamp_wib', '') or '') for row in rows if row.get('timestamp_wib')]
+        if timestamps:
+            ordered = sorted(timestamps)
+            first_bucket = datetime.strptime(ordered[0], "%Y-%m-%d %H:%M:%S")
+            first_bucket = first_bucket.replace(
+                minute=(first_bucket.minute // max(1, int(interval_minutes))) * max(1, int(interval_minutes)),
+                second=0,
+                microsecond=0,
+            )
+            last_bucket = datetime.strptime(ordered[-1], "%Y-%m-%d %H:%M:%S")
+            last_bucket = last_bucket.replace(
+                minute=(last_bucket.minute // max(1, int(interval_minutes))) * max(1, int(interval_minutes)),
+                second=0,
+                microsecond=0,
+            )
+            current_bucket = first_bucket
+            time_series = []
+
+            while current_bucket <= last_bucket:
+                bucket_key = current_bucket.strftime("%Y-%m-%d %H:%M:%S")
+                bucket = time_buckets.get(bucket_key, {'total_in': 0, 'total_out': 0})
+                time_series.append({
+                    'bucket_label': current_bucket.strftime("%H:%M"),
+                    'total_in': bucket['total_in'],
+                    'total_out': bucket['total_out'],
+                    'net_in': bucket['total_in'] - bucket['total_out'],
+                    'interval_start': bucket_key,
+                })
+                current_bucket += timedelta(minutes=max(1, int(interval_minutes)))
+        else:
+            time_series = []
+    else:
+        time_series = [
+            {
+                'bucket_label': bucket_label,
+                'total_in': bucket['total_in'],
+                'total_out': bucket['total_out'],
+                'net_in': bucket['total_in'] - bucket['total_out'],
+            }
+            for bucket_label, bucket in sorted(time_buckets.items())
+        ]
+
+    camera_summary = sorted(
+        camera_buckets.values(),
+        key=lambda item: (item['camera_id'] or '').lower(),
+    )
+
+    return {
+        **totals,
+        'raw_current_inside': raw_current_inside,
+        'time_series': time_series,
+        'camera_summary': camera_summary,
+        'session_count': len(session_ids),
+    }
+
+
+def _history_csv_rows(rows):
+    """Yield CSV rows for history export."""
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(['timestamp_wib', 'camera_id', 'direction', 'session_id'])
+    for row in rows:
+        writer.writerow([
+            row.get('timestamp_wib'),
+            row.get('camera_id'),
+            row.get('direction'),
+            row.get('session_id'),
+        ])
+    return output.getvalue()
+
+
+def _available_history_dates(rows):
+    """Return sorted unique dates found in history rows."""
+    seen = set()
+    dates = []
+
+    for row in rows:
+        timestamp_wib = str(row.get('timestamp_wib', '') or '')
+        if len(timestamp_wib) < 10:
+            continue
+
+        date_value = timestamp_wib[:10]
+        if date_value in seen:
+            continue
+
+        seen.add(date_value)
+        dates.append(date_value)
+
+    return sorted(dates, reverse=True)
+
+
+def _history_window_bounds(rows):
+    """Return the first and last recorded WIB timestamps in a filtered row set."""
+    timestamps = [str(row.get('timestamp_wib', '') or '') for row in rows if row.get('timestamp_wib')]
+    if not timestamps:
+        return None, None
+
+    ordered = sorted(timestamps)
+    return ordered[0], ordered[-1]
+
+
+@app.route('/api/history')
+def api_history():
+    """Return raw logs and aggregated history metrics from SQLite."""
+    if state_manager is None:
+        return jsonify({'error': 'state_manager not initialized'}), 500
+
+    try:
+        scope = str(request.args.get('scope', 'all')).lower()
+        selected_date = str(request.args.get('date', '')).strip()
+        granularity = str(request.args.get('granularity', 'day')).lower()
+        interval_minutes = max(1, min(60, int(request.args.get('interval_minutes', 15))))
+        limit = max(1, min(500, int(request.args.get('limit', 80))))
+
+        if selected_date:
+            granularity = 'interval'
+
+        only_current_session = scope != 'all'
+        payload = state_manager.get_event_logs(only_current_session=only_current_session)
+        rows = payload.get('rows', [])
+        available_dates = _available_history_dates(rows)
+
+        if not selected_date and available_dates:
+            selected_date = available_dates[0]
+
+        if selected_date:
+            rows = [row for row in rows if _history_matches_date(row, selected_date)]
+
+        summary = _build_history_summary(
+            rows,
+            granularity=granularity,
+            selected_date=selected_date,
+            interval_minutes=interval_minutes,
+        )
+        first_event_at, last_event_at = _history_window_bounds(rows)
+        recent_rows = list(reversed(rows))[:limit]
+
+        return jsonify({
+            'scope': scope,
+            'granularity': granularity,
+            'interval_minutes': interval_minutes,
+            'selected_date': selected_date,
+            'available_dates': available_dates,
+            'first_event_at': first_event_at,
+            'last_event_at': last_event_at,
+            'database_file': str(config.DATABASE_FILE),
+            'database_tables': ['logs', 'app_state'],
+            'session_id': payload.get('session_id'),
+            'timezone': payload.get('timezone', 'Asia/Jakarta'),
+            'generated_at': _wib_now(),
+            'rows_total': len(rows),
+            'rows_returned': len(recent_rows),
+            'recent_rows': recent_rows,
+            **summary,
+        }), 200
+    except Exception as e:
+        logger.error('Error fetching history: %s', str(e))
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/history/export')
+def export_history_csv():
+    """Export filtered history rows as CSV."""
+    if state_manager is None:
+        return jsonify({'error': 'state_manager not initialized'}), 500
+
+    try:
+        scope = str(request.args.get('scope', 'all')).lower()
+        selected_date = str(request.args.get('date', '')).strip()
+        only_current_session = scope != 'all'
+
+        payload = state_manager.get_event_logs(only_current_session=only_current_session)
+        rows = payload.get('rows', [])
+        if selected_date:
+            rows = [row for row in rows if _history_matches_date(row, selected_date)]
+
+        csv_text = _history_csv_rows(rows)
+        filename_date = selected_date or 'all_history'
+        filename = f'edge_vision_history_{filename_date}.csv'
+
+        return Response(
+            csv_text,
+            mimetype='text/csv',
+            headers={
+                'Content-Disposition': f'attachment; filename={filename}',
+                'Cache-Control': 'no-store',
+            },
+        )
+    except Exception as e:
+        logger.error('Error exporting history CSV: %s', str(e))
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/stream')
@@ -48,34 +430,58 @@ def stream():
     Format: {total_in, total_out, current_inside, camera_count, timestamp}
 
     Yields:
-        SSE formatted data string with JSON payload
+        SSE formatted data string with JSON payload every 0.5 seconds.
     """
-    if camera_manager is None:
-        logger.error("CameraManager instance not initialized")
-        return Response("error: camera_manager not initialized", status=500, mimetype='text/plain')
+    if state_manager is None:
+        logger.error("StateManager instance not initialized")
+        return Response(
+            "error: state_manager not initialized",
+            status=500,
+            mimetype='text/plain'
+        )
 
     def generate_events() -> Iterator[str]:
         """Generate SSE events with aggregated count updates."""
         try:
             logger.info("SSE client connected")
-            last_stats = None
+            last_data = None
 
             while True:
                 try:
-                    current_stats = camera_manager.get_aggregated_stats()
+                    if state_manager is None:
+                        logger.error("StateManager instance is None in event generator")
+                        yield f"data: {json.dumps({'error': 'state_manager not initialized'})}\n\n"
+                        time.sleep(1)
+                        continue
 
-                    if current_stats != last_stats:
-                        data = {
-                            'total_in': current_stats['total_in'],
-                            'total_out': current_stats['total_out'],
-                            'current_inside': current_stats['current_inside'],
-                            'camera_count': current_stats['camera_count'],
-                            'connected_count': current_stats['connected_count'],
-                            'timestamp': time.time(),
-                        }
+                    stats = state_manager.get_stats()
 
+                    camera_count = 0
+                    connected_count = 0
+                    
+                    if camera_manager is not None:
+                        try:
+                            aggregated = camera_manager.get_aggregated_stats()
+                            camera_count = aggregated.get('camera_count', 0)
+                            connected_count = aggregated.get('connected_count', 0)
+                        except Exception:
+                            pass
+
+                    data = {
+                        'total_in': stats['total_in'],
+                        'total_out': stats['total_out'],
+                        'current_inside': stats['current_inside'],
+                        'session_id': stats.get('session_id'),
+                        'timezone': stats.get('timezone', 'Asia/Jakarta'),
+                        'last_reset_at': stats.get('last_reset_at'),
+                        'camera_count': camera_count,
+                        'connected_count': connected_count,
+                        'timestamp': time.time(),
+                    }
+
+                    if data != last_data:
                         yield f"data: {json.dumps(data)}\n\n"
-                        last_stats = current_stats
+                        last_data = data.copy()
 
                     time.sleep(config.SSE_UPDATE_INTERVAL)
 
@@ -89,7 +495,15 @@ def stream():
         except Exception as e:
             logger.error("Fatal error in SSE generator: %s", str(e))
 
-    return Response(generate_events(), mimetype='text/event-stream')
+    return Response(
+        generate_events(),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no',
+        }
+    )
 
 
 @app.route('/api/stats')
@@ -98,14 +512,66 @@ def api_stats():
     REST endpoint for aggregated statistics.
 
     Returns:
-        JSON with global and per-camera counts
+        JSON with global and per-camera counts.
     """
-    if camera_manager is None:
-        return jsonify({'error': 'camera_manager not initialized'}), 500
+    if state_manager is None:
+        return jsonify({'error': 'state_manager not initialized'}), 500
 
     try:
-        stats = camera_manager.get_aggregated_stats()
-        return jsonify(stats), 200
+        stats = state_manager.get_stats()
+        analytics = state_manager.get_analytics(
+            interval_minutes=int(request.args.get('interval_minutes', 15)),
+            trend_granularity=str(request.args.get('trend_granularity', 'day')),
+        )
+        
+        result = {
+            'total_in': stats['total_in'],
+            'total_out': stats['total_out'],
+            'current_inside': stats['current_inside'],
+            'session_id': stats.get('session_id'),
+            'timezone': stats.get('timezone', 'Asia/Jakarta'),
+            'last_reset_at': stats.get('last_reset_at'),
+            'interval_minutes': analytics.get('interval_minutes', 15),
+            'trend_granularity': analytics.get('trend_granularity', 'day'),
+            'time_series': analytics.get('time_series', []),
+            'camera_summary': analytics.get('camera_summary', []),
+            'generated_at': _wib_now(),
+        }
+        # Add time metadata
+        result['now'] = analytics.get('now', _wib_now())
+        result['started_at'] = analytics.get('start_at', stats.get('last_reset_at'))
+        
+        # Add consistency validation
+        time_series_total_in = sum(item.get('total_in', 0) for item in analytics.get('time_series', []))
+        time_series_total_out = sum(item.get('total_out', 0) for item in analytics.get('time_series', []))
+        result['data_consistency'] = {
+            'expected_total_in': stats['total_in'],
+            'expected_total_out': stats['total_out'],
+            'actual_time_series_in': time_series_total_in,
+            'actual_time_series_out': time_series_total_out,
+            'match': (time_series_total_in == stats['total_in'] and 
+                     time_series_total_out == stats['total_out']),
+        }
+
+        if camera_manager is not None:
+            try:
+                aggregated = camera_manager.get_aggregated_stats()
+                result['camera_count'] = aggregated.get('camera_count', 0)
+                result['connected_count'] = aggregated.get('connected_count', 0)
+                result['cameras'] = aggregated.get('cameras', [])
+            except Exception as e:
+                logger.warning("Error getting camera stats: %s", str(e))
+
+        if camera_manager is not None and getattr(camera_manager, 'model', None) is not None:
+            try:
+                result['gpu'] = camera_manager.model.get_gpu_stats()
+            except Exception as e:
+                logger.warning("Error getting GPU stats: %s", str(e))
+
+        result['service_url'] = f"http://{config.MDNS_HOSTNAME}.local:{config.FLASK_PORT}"
+
+        return jsonify(result), 200
+
     except Exception as e:
         logger.error("Error fetching stats: %s", str(e))
         return jsonify({'error': str(e)}), 500
@@ -117,10 +583,10 @@ def camera_stats(camera_id: str):
     REST endpoint for per-camera statistics.
 
     Args:
-        camera_id: Camera ID from config
+        camera_id: Camera ID from config.
 
     Returns:
-        JSON with camera-specific stats or 404 if not found
+        JSON with camera-specific stats or 404 if not found.
     """
     if camera_manager is None:
         return jsonify({'error': 'camera_manager not initialized'}), 500
@@ -135,27 +601,168 @@ def camera_stats(camera_id: str):
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/set_count', methods=['POST'])
+def set_count():
+    """
+    Admin API: Adjust total_out based on total_in so that
+    (total_in - total_out) equals the target_inside value.
+
+    Request JSON:
+        {"target_inside": <int>}
+
+    Returns:
+        JSON with success status and updated stats.
+    """
+    if state_manager is None:
+        return jsonify({'error': 'state_manager not initialized'}), 500
+
+    try:
+        data = request.get_json()
+        
+        if data is None:
+            return jsonify({'error': 'Invalid JSON body'}), 400
+
+        target_inside = data.get('target_inside')
+        
+        if target_inside is None:
+            return jsonify({'error': 'target_inside is required'}), 400
+
+        try:
+            target_inside = int(target_inside)
+        except (ValueError, TypeError):
+            return jsonify({'error': 'target_inside must be an integer'}), 400
+
+        if target_inside < 0:
+            return jsonify({'error': 'target_inside cannot be negative'}), 400
+
+        state_manager.set_current_inside(target_inside)
+        
+        updated_stats = state_manager.get_stats()
+        
+        logger.info(
+            "Manual calibration via API: target_inside=%d, new stats=%s",
+            target_inside,
+            updated_stats
+        )
+
+        return jsonify({
+            'success': True,
+            'message': f'Current inside count set to {target_inside}',
+            'stats': updated_stats,
+        }), 200
+
+    except Exception as e:
+        logger.error("Error in set_count API: %s", str(e))
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/reset', methods=['POST'])
+def reset():
+    """
+    Admin API: Reset all counts to zero.
+
+    Returns:
+        JSON with success status.
+    """
+    if state_manager is None:
+        return jsonify({'error': 'state_manager not initialized'}), 500
+
+    try:
+        data = request.get_json(silent=True) or {}
+        provided_password = str(data.get('password', ''))
+        reset_password = str(getattr(config, 'ADMIN_RESET_PASSWORD', 'admin'))
+
+        if provided_password != reset_password:
+            return jsonify({'error': 'Invalid password'}), 403
+
+        with state_manager.session_mutation():
+            if camera_manager is not None:
+                camera_manager.reset_all_camera_counts()
+
+            state_manager.reset()
+        
+        logger.info("All counts reset via API")
+
+        return jsonify({
+            'success': True,
+            'message': 'All counts have been reset to zero',
+            'stats': state_manager.get_stats(),
+        }), 200
+
+    except Exception as e:
+        logger.error("Error in reset API: %s", str(e))
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/export')
+def export_logs():
+    """Export SQLite event logs as CSV for active session by default."""
+    if state_manager is None:
+        return jsonify({'error': 'state_manager not initialized'}), 500
+
+    try:
+        export_all = str(request.args.get('all', '0')).lower() in {'1', 'true', 'yes'}
+        payload = state_manager.get_event_logs(only_current_session=not export_all)
+        session_id = payload.get('session_id', 'unknown')
+        rows = payload.get('rows', [])
+
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(['id', 'timestamp_wib', 'camera_id', 'direction', 'session_id'])
+        for row in rows:
+            writer.writerow([
+                row.get('id'),
+                row.get('timestamp_wib'),
+                row.get('camera_id'),
+                row.get('direction'),
+                row.get('session_id'),
+            ])
+
+        csv_text = output.getvalue()
+        output.close()
+        filename = f"edge_vision_logs_{session_id}.csv"
+
+        return Response(
+            csv_text,
+            mimetype='text/csv',
+            headers={
+                'Content-Disposition': f'attachment; filename={filename}',
+                'Cache-Control': 'no-store',
+            },
+        )
+    except Exception as e:
+        logger.error('Error exporting CSV: %s', str(e))
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/health')
 def health():
     """
     Health check endpoint.
     Returns system health and device info.
     """
-    if camera_manager is None:
-        return jsonify({'status': 'degraded', 'error': 'camera_manager not initialized'}), 503
+    health_data = {
+        'status': 'healthy',
+        'state_manager': state_manager is not None,
+        'camera_manager': camera_manager is not None,
+    }
 
-    try:
-        stats = camera_manager.get_aggregated_stats()
-        health_status = {
-            'status': 'healthy' if stats['connected_count'] > 0 else 'unhealthy',
-            'cameras_connected': stats['connected_count'],
-            'cameras_total': stats['camera_count'],
-            'inference_device': 'openvino_GPU' if camera_manager.model.device.startswith('openvino') else camera_manager.model.device,
-        }
-        return jsonify(health_status), 200
-    except Exception as e:
-        logger.error("Error in health check: %s", str(e))
-        return jsonify({'status': 'error', 'error': str(e)}), 500
+    if camera_manager is not None:
+        try:
+            stats = camera_manager.get_aggregated_stats()
+            health_data['cameras_connected'] = stats['connected_count']
+            health_data['cameras_total'] = stats['camera_count']
+            health_data['inference_device'] = camera_manager.model.get_device()
+            
+            if stats['connected_count'] == 0 and stats['camera_count'] > 0:
+                health_data['status'] = 'degraded'
+        except Exception as e:
+            logger.error("Error in health check: %s", str(e))
+            health_data['status'] = 'degraded'
+            health_data['error'] = str(e)
+
+    status_code = 200 if health_data['status'] == 'healthy' else 503
+    return jsonify(health_data), status_code
 
 
 @app.errorhandler(404)
@@ -171,15 +778,25 @@ def internal_error(error):
     return jsonify({'error': 'Internal server error'}), 500
 
 
-def run_app(host: str = config.FLASK_HOST, port: int = config.FLASK_PORT, debug: bool = config.FLASK_DEBUG) -> None:
+def run_app(
+    host: str = config.FLASK_HOST,
+    port: int = config.FLASK_PORT,
+    debug: bool = config.FLASK_DEBUG
+) -> None:
     """
     Run the Flask web server.
 
     Args:
-        host: Host to bind to
-        port: Port to bind to
-        debug: Debug mode flag
+        host: Host to bind to.
+        port: Port to bind to.
+        debug: Debug mode flag.
     """
+    start_mdns_service(port)
     logger.info("Starting Flask server on %s:%d", host, port)
-    app.run(host=host, port=port, debug=debug, threaded=True, use_reloader=False)
-
+    app.run(
+        host=host,
+        port=port,
+        debug=debug,
+        threaded=True,
+        use_reloader=False
+    )
