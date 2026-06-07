@@ -155,3 +155,5 @@ cache/
 .cache/
 
 *.db
+
+/docs

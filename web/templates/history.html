@@ -1,0 +1,780 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Edge Vision Counter V2 - History</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+    <style>
+        :root {
+            --bg: #07111a;
+            --bg-soft: rgba(11, 22, 34, 0.88);
+            --panel: rgba(14, 28, 43, 0.92);
+            --line: rgba(121, 226, 255, 0.14);
+            --accent: #79e2ff;
+            --accent-2: #33d6a6;
+            --danger: #ff5470;
+            --warning: #ffcd57;
+            --text: #d6e4f0;
+            --text-soft: #8aa0b4;
+            --glow: 0 18px 50px rgba(0, 0, 0, 0.35);
+        }
+
+        * { box-sizing: border-box; }
+        html, body { margin: 0; padding: 0; }
+        body {
+            font-family: 'Space Grotesk', sans-serif;
+            color: var(--text);
+            min-height: 100vh;
+            background:
+                radial-gradient(circle at top left, rgba(121, 226, 255, 0.14), transparent 28%),
+                radial-gradient(circle at top right, rgba(51, 214, 166, 0.10), transparent 22%),
+                linear-gradient(180deg, #08111a 0%, #050b12 100%);
+        }
+
+        body::before {
+            content: '';
+            position: fixed;
+            inset: 0;
+            pointer-events: none;
+            background-image: linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px);
+            background-size: 28px 28px;
+            mask-image: linear-gradient(180deg, rgba(0,0,0,0.5), transparent 85%);
+        }
+
+        .container {
+            width: min(1600px, calc(100% - 32px));
+            margin: 0 auto;
+            padding: 28px 0 40px;
+            position: relative;
+            z-index: 1;
+        }
+
+        header { margin-bottom: 18px; }
+
+        .hero {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: space-between;
+            gap: 16px;
+            align-items: center;
+            padding: 22px 24px;
+            border: 1px solid var(--line);
+            border-radius: 24px;
+            background: var(--bg-soft);
+            box-shadow: var(--glow);
+        }
+
+        .brand { display: flex; align-items: center; gap: 16px; }
+
+        .brand-mark {
+            width: 54px;
+            height: 54px;
+            border-radius: 16px;
+            display: grid;
+            place-items: center;
+            background: linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%);
+            color: #06111a;
+            font-weight: 700;
+            letter-spacing: 0.06em;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: clamp(1.8rem, 3vw, 2.7rem);
+            line-height: 1.05;
+        }
+
+        .subtitle {
+            margin: 4px 0 0;
+            color: var(--text-soft);
+            letter-spacing: 0.16em;
+            text-transform: uppercase;
+            font-size: 0.78rem;
+        }
+
+        .meta-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            justify-content: flex-end;
+            align-items: center;
+        }
+
+        .pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 14px;
+            border-radius: 999px;
+            border: 1px solid var(--line);
+            background: rgba(255, 255, 255, 0.03);
+            color: var(--text-soft);
+            font-size: 0.82rem;
+            text-decoration: none;
+        }
+
+        .pill:hover { border-color: rgba(121, 226, 255, 0.4); color: var(--text); }
+
+        .btn-action {
+            padding: 10px 14px;
+            border-radius: 999px;
+            border: 1px solid var(--line);
+            background: rgba(51, 214, 166, 0.08);
+            color: var(--text);
+            font: inherit;
+            cursor: pointer;
+            transition: all 0.2s;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn-action:hover {
+            border-color: rgba(51, 214, 166, 0.45);
+            background: rgba(51, 214, 166, 0.14);
+        }
+
+        .btn-action.disabled {
+            opacity: 0.45;
+            pointer-events: none;
+        }
+
+        .date-input {
+            padding: 10px 14px;
+            border-radius: 999px;
+            border: 1px solid var(--line);
+            background: rgba(255, 255, 255, 0.03);
+            color: var(--text);
+            font: inherit;
+            outline: none;
+        }
+
+        .date-input:focus { border-color: rgba(121, 226, 255, 0.65); }
+
+        .date-select {
+            padding: 10px 14px;
+            border-radius: 999px;
+            border: 1px solid var(--line);
+            background: rgba(255, 255, 255, 0.03);
+            color: var(--text);
+            font: inherit;
+            outline: none;
+            min-width: 170px;
+        }
+
+        .date-select:focus { border-color: rgba(121, 226, 255, 0.65); }
+
+        .status-grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 16px;
+            margin-bottom: 16px;
+        }
+
+        @media (max-width: 1100px) { .status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+        @media (max-width: 680px) { .status-grid { grid-template-columns: 1fr; } }
+
+        .stat-card {
+            padding: 22px;
+            border-radius: 22px;
+            background: var(--panel);
+            border: 1px solid var(--line);
+            box-shadow: var(--glow);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .stat-card::after {
+            content: '';
+            position: absolute;
+            inset: auto -10% -50% auto;
+            width: 180px;
+            height: 180px;
+            border-radius: 50%;
+            background: radial-gradient(circle, rgba(121, 226, 255, 0.18), transparent 68%);
+            pointer-events: none;
+        }
+
+        .stat-label {
+            color: var(--text-soft);
+            text-transform: uppercase;
+            letter-spacing: 0.16em;
+            font-size: 0.72rem;
+            margin-bottom: 12px;
+        }
+
+        .stat-value {
+            font-size: clamp(2rem, 4vw, 3.7rem);
+            font-weight: 700;
+            line-height: 1;
+        }
+
+        .stat-note {
+            margin-top: 10px;
+            color: var(--text-soft);
+            font-size: 0.84rem;
+        }
+
+        .stat-value.in { color: var(--accent-2); }
+        .stat-value.out { color: var(--danger); }
+        .stat-value.net { color: var(--accent); }
+        .stat-value.events { color: var(--warning); }
+
+        .panel-grid {
+            display: grid;
+            grid-template-columns: 1.35fr 0.95fr;
+            gap: 16px;
+            margin-bottom: 16px;
+        }
+
+        @media (max-width: 1100px) { .panel-grid { grid-template-columns: 1fr; } }
+
+        .panel {
+            padding: 22px;
+            border-radius: 24px;
+            background: var(--panel);
+            border: 1px solid var(--line);
+            box-shadow: var(--glow);
+        }
+
+        .panel-head {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            align-items: center;
+            margin-bottom: 16px;
+            flex-wrap: wrap;
+        }
+
+        .panel-title {
+            margin: 0;
+            font-size: 1rem;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+
+        .panel-subtitle {
+            color: var(--text-soft);
+            font-size: 0.84rem;
+        }
+
+        .chart-wrap {
+            position: relative;
+            height: 460px;
+        }
+
+        .button-row {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .btn-small {
+            padding: 8px 12px;
+            font-size: 0.8rem;
+            border-radius: 10px;
+            border: 1px solid var(--line);
+            background: rgba(255,255,255,0.04);
+            color: var(--text-soft);
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn-small:hover {
+            background: rgba(255,255,255,0.08);
+            border-color: var(--accent);
+        }
+
+        .btn-small.active {
+            background: var(--accent);
+            color: var(--bg);
+            border-color: var(--accent);
+            opacity: 1.0 !important;
+        }
+
+        .table-wrap { overflow-x: auto; }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            min-width: 820px;
+        }
+
+        th, td {
+            text-align: left;
+            padding: 12px 14px;
+            border-bottom: 1px solid rgba(255,255,255,0.06);
+            font-size: 0.92rem;
+        }
+
+        th {
+            color: var(--text-soft);
+            text-transform: uppercase;
+            letter-spacing: 0.12em;
+            font-size: 0.72rem;
+        }
+
+        tbody tr:hover { background: rgba(255,255,255,0.03); }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 10px;
+            border-radius: 999px;
+            font-size: 0.76rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+        }
+
+        .badge.in {
+            color: var(--accent-2);
+            background: rgba(51, 214, 166, 0.12);
+            border: 1px solid rgba(51, 214, 166, 0.22);
+        }
+
+        .badge.out {
+            color: var(--danger);
+            background: rgba(255, 84, 112, 0.12);
+            border: 1px solid rgba(255, 84, 112, 0.22);
+        }
+
+        .muted { color: var(--text-soft); }
+
+        .empty-state {
+            padding: 28px 0;
+            color: var(--text-soft);
+            text-align: center;
+        }
+
+        .footer {
+            margin-top: 18px;
+            color: var(--text-soft);
+            text-align: center;
+            font-size: 0.84rem;
+            padding: 12px 0 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="hero">
+                <div class="brand">
+                    <div class="brand-mark">DB</div>
+                    <div>
+                        <h1>History Analytics</h1>
+                        <p class="subtitle">SQLite event log view for all recorded crossings</p>
+                    </div>
+                </div>
+                <div class="meta-row">
+                    <a class="pill" href="/">Back to live dashboard</a>
+                    <select class="date-select" id="historyDate">
+                        <option value="">Loading dates...</option>
+                    </select>
+                    <a class="btn-action" id="downloadCsvBtn" href="#">Download CSV</a>
+                    <button class="btn-action" id="downloadImageBtn" type="button">Download Chart PNG</button>
+                    <div class="pill"><span id="dbSource">DB: -</span></div>
+                    <div class="pill"><span id="timeRangeInfo">Range: -</span></div>
+                    <div class="pill"><span id="scopeLabel">All history</span></div>
+                    <div class="pill"><span id="rowLabel">0 rows</span></div>
+                </div>
+            </div>
+        </header>
+
+        <section class="status-grid">
+            <article class="stat-card">
+                <div class="stat-label">Total Masuk</div>
+                <div class="stat-value in" id="totalIn">0</div>
+                <div class="stat-note">All IN events stored in SQLite</div>
+            </article>
+            <article class="stat-card">
+                <div class="stat-label">Total Keluar</div>
+                <div class="stat-value out" id="totalOut">0</div>
+                <div class="stat-note">All OUT events stored in SQLite</div>
+            </article>
+            <article class="stat-card">
+                <div class="stat-label">Saat Ini Di Dalam</div>
+                <div class="stat-value net" id="currentInside">0</div>
+                <div class="stat-note" id="balanceNote">Net balance from database history</div>
+            </article>
+            <article class="stat-card">
+                <div class="stat-label">Total Event</div>
+                <div class="stat-value events" id="totalEvents">0</div>
+                <div class="stat-note"><span id="sessionCount">0</span> session tracked in the database</div>
+            </article>
+        </section>
+
+        <section class="panel-grid">
+            <article class="panel">
+                <div class="panel-head">
+                    <div>
+                        <h2 class="panel-title">Historical Trend</h2>
+                        <div class="panel-subtitle">Selected day is grouped into 15-minute buckets for time-series analysis</div>
+                    </div>
+                </div>
+                <div class="chart-wrap">
+                    <canvas id="historyChart"></canvas>
+                </div>
+            </article>
+
+            <article class="panel">
+                <div class="panel-head">
+                    <div>
+                        <h2 class="panel-title">Camera Totals</h2>
+                        <div class="panel-subtitle">Per-camera IN/OUT totals from the selected history scope</div>
+                    </div>
+                </div>
+                <div class="chart-wrap">
+                    <canvas id="cameraChart"></canvas>
+                </div>
+            </article>
+        </section>
+
+        <section class="panel">
+            <div class="panel-head">
+                <div>
+                    <h2 class="panel-title">Recent Database Rows</h2>
+                    <div class="panel-subtitle">Latest event rows pulled from SQLite for quick inspection</div>
+                </div>
+                <div class="panel-subtitle" id="generatedAt"></div>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Timestamp WIB</th>
+                            <th>Camera</th>
+                            <th>Direction</th>
+                            <th>Session</th>
+                        </tr>
+                    </thead>
+                    <tbody id="historyTableBody"></tbody>
+                </table>
+            </div>
+            <div class="empty-state" id="emptyState" style="display:none;">No history rows found in the selected scope.</div>
+        </section>
+
+        <footer class="footer">Edge Vision Counter V2 - SQLite history explorer</footer>
+    </div>
+
+    <script>
+        const elements = {
+            totalIn: document.getElementById('totalIn'),
+            totalOut: document.getElementById('totalOut'),
+            currentInside: document.getElementById('currentInside'),
+            totalEvents: document.getElementById('totalEvents'),
+            rowLabel: document.getElementById('rowLabel'),
+            scopeLabel: document.getElementById('scopeLabel'),
+            sessionCount: document.getElementById('sessionCount'),
+            historyDate: document.getElementById('historyDate'),
+            downloadCsvBtn: document.getElementById('downloadCsvBtn'),
+            downloadImageBtn: document.getElementById('downloadImageBtn'),
+            dbSource: document.getElementById('dbSource'),
+            timeRangeInfo: document.getElementById('timeRangeInfo'),
+            balanceNote: document.getElementById('balanceNote'),
+            generatedAt: document.getElementById('generatedAt'),
+            historyTableBody: document.getElementById('historyTableBody'),
+            emptyState: document.getElementById('emptyState'),
+        };
+
+        const state = {
+            selectedDate: '',
+            availableDates: [],
+        };
+
+        let historyChart = null;
+        let cameraChart = null;
+
+        function formatNumber(value) {
+            return Number(value || 0).toLocaleString();
+        }
+
+        function formatTimestamp(value) {
+            if (!value) return '-';
+            try {
+                return new Date(value.replace(' ', 'T') + '+07:00').toLocaleString('id-ID');
+            } catch (error) {
+                return value;
+            }
+        }
+
+        function renderDateDropdown(availableDates, selectedDate) {
+            state.availableDates = availableDates || [];
+            elements.historyDate.innerHTML = '';
+
+            if (!state.availableDates.length) {
+                const option = document.createElement('option');
+                option.value = '';
+                option.textContent = 'No days available';
+                elements.historyDate.appendChild(option);
+                elements.historyDate.disabled = true;
+                state.selectedDate = '';
+                updateDownloadLink();
+                return;
+            }
+
+            elements.historyDate.disabled = false;
+            for (const dateValue of state.availableDates) {
+                const option = document.createElement('option');
+                option.value = dateValue;
+                option.textContent = dateValue;
+                elements.historyDate.appendChild(option);
+            }
+
+            const nextSelected = selectedDate && state.availableDates.includes(selectedDate)
+                ? selectedDate
+                : state.availableDates[0];
+
+            elements.historyDate.value = nextSelected;
+            state.selectedDate = nextSelected;
+            updateDownloadLink();
+        }
+
+        function updateSummary(data) {
+            elements.totalIn.textContent = formatNumber(data.total_in);
+            elements.totalOut.textContent = formatNumber(data.total_out);
+            elements.currentInside.textContent = formatNumber(data.current_inside);
+            elements.totalEvents.textContent = formatNumber(data.total_events);
+            elements.rowLabel.textContent = `${formatNumber(data.rows_total)} rows`;
+            if (data.selected_date) {
+                elements.scopeLabel.textContent = `Selected day: ${data.selected_date}`;
+            } else {
+                elements.scopeLabel.textContent = data.scope === 'current' ? 'Current session' : 'All history';
+            }
+            elements.sessionCount.textContent = formatNumber(data.session_count);
+            elements.generatedAt.textContent = data.generated_at ? `Updated ${formatTimestamp(data.generated_at)}` : '';
+
+            if (data.database_file) {
+                const tables = Array.isArray(data.database_tables) ? data.database_tables.join(', ') : 'logs, app_state';
+                elements.dbSource.textContent = `DB: ${data.database_file} · tables: ${tables}`;
+            }
+
+            const firstEvent = data.first_event_at ? formatTimestamp(data.first_event_at) : '-';
+            const lastEvent = data.last_event_at ? formatTimestamp(data.last_event_at) : '-';
+            elements.timeRangeInfo.textContent = `Range: ${firstEvent} → ${lastEvent}`;
+
+            if (typeof data.raw_current_inside === 'number' && data.raw_current_inside < 0) {
+                elements.balanceNote.textContent = `Raw balance ${data.raw_current_inside}; clamped to 0 because the selected window started after some exits.`;
+            } else {
+                elements.balanceNote.textContent = 'Net balance from database history';
+            }
+        }
+
+        function renderTrendChart(timeSeries) {
+            const labels = timeSeries.map((item) => item.bucket_label || '');
+            const inSeries = timeSeries.map((item) => item.total_in || 0);
+            const outSeries = timeSeries.map((item) => item.total_out || 0);
+            const netSeries = timeSeries.map((item) => item.net_in || 0);
+
+            const ctx = document.getElementById('historyChart');
+            if (historyChart) {
+                historyChart.data.labels = labels;
+                historyChart.data.datasets[0].data = inSeries;
+                historyChart.data.datasets[1].data = outSeries;
+                historyChart.data.datasets[2].data = netSeries;
+                historyChart.update('none');
+                return;
+            }
+
+            historyChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels,
+                    datasets: [
+                        {
+                            label: 'Masuk',
+                            data: inSeries,
+                            borderColor: 'rgba(51, 214, 166, 0.95)',
+                            backgroundColor: 'rgba(51, 214, 166, 0.12)',
+                            tension: 0.35,
+                            fill: false,
+                            pointRadius: 2,
+                            pointHoverRadius: 4,
+                        },
+                        {
+                            label: 'Keluar',
+                            data: outSeries,
+                            borderColor: 'rgba(255, 84, 112, 0.95)',
+                            backgroundColor: 'rgba(255, 84, 112, 0.10)',
+                            tension: 0.35,
+                            fill: false,
+                            pointRadius: 2,
+                            pointHoverRadius: 4,
+                        },
+                        {
+                            label: 'Net Inside',
+                            data: netSeries,
+                            borderColor: '#79e2ff',
+                            backgroundColor: 'rgba(121, 226, 255, 0.12)',
+                            tension: 0.35,
+                            fill: false,
+                            pointRadius: 2,
+                            pointHoverRadius: 4,
+                        },
+                    ],
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: false,
+                    plugins: {
+                        legend: {
+                            labels: { color: '#d6e4f0' },
+                        },
+                        tooltip: {
+                            callbacks: {
+                                title: (items) => items?.[0]?.label || '',
+                            },
+                        },
+                    },
+                    scales: {
+                        x: { ticks: { color: '#8aa0b4' }, grid: { color: 'rgba(255,255,255,0.05)' } },
+                        y: { beginAtZero: true, ticks: { color: '#8aa0b4' }, grid: { color: 'rgba(255,255,255,0.05)' } },
+                    },
+                },
+            });
+        }
+
+        function renderCameraChart(cameraSummary) {
+            const labels = cameraSummary.map((item) => item.camera_id || 'unknown');
+            const inSeries = cameraSummary.map((item) => item.total_in || 0);
+            const outSeries = cameraSummary.map((item) => item.total_out || 0);
+
+            const ctx = document.getElementById('cameraChart');
+            if (cameraChart) {
+                cameraChart.data.labels = labels;
+                cameraChart.data.datasets[0].data = inSeries;
+                cameraChart.data.datasets[1].data = outSeries;
+                cameraChart.update('none');
+                return;
+            }
+
+            cameraChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels,
+                    datasets: [
+                        {
+                            label: 'Masuk',
+                            data: inSeries,
+                            backgroundColor: 'rgba(51, 214, 166, 0.75)',
+                        },
+                        {
+                            label: 'Keluar',
+                            data: outSeries,
+                            backgroundColor: 'rgba(255, 84, 112, 0.75)',
+                        },
+                    ],
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: false,
+                    plugins: {
+                        legend: { labels: { color: '#d6e4f0' } },
+                    },
+                    scales: {
+                        x: { ticks: { color: '#8aa0b4' }, grid: { color: 'rgba(255,255,255,0.05)' } },
+                        y: { beginAtZero: true, ticks: { color: '#8aa0b4' }, grid: { color: 'rgba(255,255,255,0.05)' } },
+                    },
+                },
+            });
+        }
+
+        function renderHistoryRows(rows) {
+            if (!rows.length) {
+                elements.historyTableBody.innerHTML = '';
+                elements.emptyState.style.display = 'block';
+                return;
+            }
+
+            elements.emptyState.style.display = 'none';
+            elements.historyTableBody.innerHTML = rows.map((row) => {
+                const direction = String(row.direction || '').toUpperCase();
+                const badgeClass = direction === 'IN' ? 'in' : 'out';
+                return `
+                    <tr>
+                        <td>${formatTimestamp(row.timestamp_wib)}</td>
+                        <td>${row.camera_id || '-'}</td>
+                        <td><span class="badge ${badgeClass}">${direction || '-'}</span></td>
+                        <td class="muted">${row.session_id || '-'}</td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        async function refreshHistory() {
+            try {
+                const params = new URLSearchParams({
+                    scope: 'all',
+                    granularity: 'interval',
+                    interval_minutes: '15',
+                    limit: '80',
+                });
+
+                if (state.selectedDate) {
+                    params.set('date', state.selectedDate);
+                }
+
+                const response = await fetch(`/api/history?${params.toString()}`, { cache: 'no-store' });
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.error || 'Failed to load history');
+                }
+
+                updateSummary(data);
+                renderDateDropdown(data.available_dates || [], data.selected_date || '');
+                renderTrendChart(data.time_series || []);
+                renderCameraChart(data.camera_summary || []);
+                renderHistoryRows(data.recent_rows || []);
+                updateDownloadLink();
+            } catch (error) {
+                console.error(error);
+                elements.emptyState.style.display = 'block';
+                elements.emptyState.textContent = 'Failed to load history data.';
+            }
+        }
+
+        function setSelectedDate(dateValue) {
+            state.selectedDate = dateValue || '';
+            refreshHistory();
+        }
+
+        function updateDownloadLink() {
+            const params = new URLSearchParams({ scope: 'all' });
+            if (state.selectedDate) {
+                params.set('date', state.selectedDate);
+            }
+            elements.downloadCsvBtn.href = `/api/history/export?${params.toString()}`;
+            elements.downloadImageBtn.classList.toggle('disabled', !historyChart);
+        }
+
+        function downloadChartImage() {
+            if (!historyChart) return;
+
+            const dateLabel = state.selectedDate || 'history';
+            const link = document.createElement('a');
+            link.href = historyChart.toBase64Image('image/png', 1);
+            link.download = `edge_vision_history_${dateLabel}.png`;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+        }
+
+        elements.historyDate.addEventListener('change', (event) => setSelectedDate(event.target.value));
+        elements.downloadImageBtn.addEventListener('click', downloadChartImage);
+
+        document.addEventListener('DOMContentLoaded', async () => {
+            await refreshHistory();
+            setInterval(refreshHistory, 15000);
+        });
+    </script>
+</body>
+</html>

@@ -10,9 +10,11 @@ import json
 import logging
 import importlib
 import io
+import math
 import socket
 import time
-from datetime import datetime
+from collections import defaultdict
+from datetime import datetime, timedelta
 from typing import Iterator, Optional
 from flask import Flask, render_template, Response, jsonify, request
 import pytz
@@ -25,6 +27,8 @@ WIB_TZ = pytz.timezone("Asia/Jakarta")
 
 app = Flask(__name__, template_folder='templates')
 app.config['JSON_SORT_KEYS'] = False
+app.config['TEMPLATES_AUTO_RELOAD'] = True
+app.jinja_env.auto_reload = True
 
 camera_manager = None
 state_manager: Optional[StateManager] = None
@@ -134,6 +138,288 @@ def stop_mdns_service() -> None:
 def index():
     """Serve the main dashboard HTML."""
     return render_template('index.html')
+
+
+@app.route('/history')
+def history():
+    """Serve the historical analytics dashboard."""
+    return render_template('history.html')
+
+
+def _history_bucket_label(timestamp_wib: str, granularity: str, interval_minutes: int = 15) -> str:
+    """Convert a WIB timestamp string into a display bucket label."""
+    parsed = datetime.strptime(timestamp_wib, "%Y-%m-%d %H:%M:%S")
+    granularity = str(granularity).lower()
+
+    if granularity == 'hour':
+        bucket = parsed.replace(minute=0, second=0, microsecond=0)
+        return bucket.strftime("%Y-%m-%d %H:00")
+
+    if granularity == 'interval':
+        interval_minutes = max(1, int(interval_minutes))
+        bucket_minute = (parsed.minute // interval_minutes) * interval_minutes
+        bucket = parsed.replace(minute=bucket_minute, second=0, microsecond=0)
+        return bucket.strftime("%Y-%m-%d %H:%M:%S")
+
+    bucket = parsed.replace(hour=0, minute=0, second=0, microsecond=0)
+    return bucket.strftime("%Y-%m-%d")
+
+
+def _history_matches_date(row, selected_date: str) -> bool:
+    """Return True when a history row belongs to the selected WIB date."""
+    if not selected_date:
+        return True
+
+    timestamp_wib = str(row.get('timestamp_wib', '') or '')
+    return timestamp_wib.startswith(selected_date)
+
+
+def _build_history_summary(rows, granularity: str = 'day', selected_date: str = '', interval_minutes: int = 15):
+    """Aggregate raw event rows into history analytics for the browser."""
+    totals = {
+        'total_in': 0,
+        'total_out': 0,
+        'current_inside': 0,
+        'total_events': 0,
+    }
+    time_buckets = defaultdict(lambda: {'total_in': 0, 'total_out': 0})
+    camera_buckets = defaultdict(lambda: {
+        'camera_id': '',
+        'total_in': 0,
+        'total_out': 0,
+        'total_events': 0,
+        'last_event_at': None,
+    })
+    session_ids = set()
+
+    for row in rows:
+        direction = str(row.get('direction', '')).upper()
+        camera_id = str(row.get('camera_id', 'unknown') or 'unknown')
+        timestamp_wib = str(row.get('timestamp_wib', '') or '')
+        session_id = str(row.get('session_id', '') or '')
+
+        if session_id:
+            session_ids.add(session_id)
+
+        totals['total_events'] += 1
+        if direction == 'IN':
+            totals['total_in'] += 1
+        elif direction == 'OUT':
+            totals['total_out'] += 1
+
+        if timestamp_wib:
+            bucket_label = _history_bucket_label(timestamp_wib, granularity, interval_minutes=interval_minutes)
+            bucket = time_buckets[bucket_label]
+            if direction == 'IN':
+                bucket['total_in'] += 1
+            elif direction == 'OUT':
+                bucket['total_out'] += 1
+
+        camera = camera_buckets[camera_id]
+        camera['camera_id'] = camera_id
+        camera['total_events'] += 1
+        if direction == 'IN':
+            camera['total_in'] += 1
+        elif direction == 'OUT':
+            camera['total_out'] += 1
+        if timestamp_wib and (camera['last_event_at'] is None or timestamp_wib > camera['last_event_at']):
+            camera['last_event_at'] = timestamp_wib
+
+    raw_current_inside = totals['total_in'] - totals['total_out']
+    totals['current_inside'] = max(0, raw_current_inside)
+
+    if granularity == 'interval' and selected_date:
+        timestamps = [str(row.get('timestamp_wib', '') or '') for row in rows if row.get('timestamp_wib')]
+        if timestamps:
+            ordered = sorted(timestamps)
+            first_bucket = datetime.strptime(ordered[0], "%Y-%m-%d %H:%M:%S")
+            first_bucket = first_bucket.replace(
+                minute=(first_bucket.minute // max(1, int(interval_minutes))) * max(1, int(interval_minutes)),
+                second=0,
+                microsecond=0,
+            )
+            last_bucket = datetime.strptime(ordered[-1], "%Y-%m-%d %H:%M:%S")
+            last_bucket = last_bucket.replace(
+                minute=(last_bucket.minute // max(1, int(interval_minutes))) * max(1, int(interval_minutes)),
+                second=0,
+                microsecond=0,
+            )
+            current_bucket = first_bucket
+            time_series = []
+
+            while current_bucket <= last_bucket:
+                bucket_key = current_bucket.strftime("%Y-%m-%d %H:%M:%S")
+                bucket = time_buckets.get(bucket_key, {'total_in': 0, 'total_out': 0})
+                time_series.append({
+                    'bucket_label': current_bucket.strftime("%H:%M"),
+                    'total_in': bucket['total_in'],
+                    'total_out': bucket['total_out'],
+                    'net_in': bucket['total_in'] - bucket['total_out'],
+                    'interval_start': bucket_key,
+                })
+                current_bucket += timedelta(minutes=max(1, int(interval_minutes)))
+        else:
+            time_series = []
+    else:
+        time_series = [
+            {
+                'bucket_label': bucket_label,
+                'total_in': bucket['total_in'],
+                'total_out': bucket['total_out'],
+                'net_in': bucket['total_in'] - bucket['total_out'],
+            }
+            for bucket_label, bucket in sorted(time_buckets.items())
+        ]
+
+    camera_summary = sorted(
+        camera_buckets.values(),
+        key=lambda item: (item['camera_id'] or '').lower(),
+    )
+
+    return {
+        **totals,
+        'raw_current_inside': raw_current_inside,
+        'time_series': time_series,
+        'camera_summary': camera_summary,
+        'session_count': len(session_ids),
+    }
+
+
+def _history_csv_rows(rows):
+    """Yield CSV rows for history export."""
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(['timestamp_wib', 'camera_id', 'direction', 'session_id'])
+    for row in rows:
+        writer.writerow([
+            row.get('timestamp_wib'),
+            row.get('camera_id'),
+            row.get('direction'),
+            row.get('session_id'),
+        ])
+    return output.getvalue()
+
+
+def _available_history_dates(rows):
+    """Return sorted unique dates found in history rows."""
+    seen = set()
+    dates = []
+
+    for row in rows:
+        timestamp_wib = str(row.get('timestamp_wib', '') or '')
+        if len(timestamp_wib) < 10:
+            continue
+
+        date_value = timestamp_wib[:10]
+        if date_value in seen:
+            continue
+
+        seen.add(date_value)
+        dates.append(date_value)
+
+    return sorted(dates, reverse=True)
+
+
+def _history_window_bounds(rows):
+    """Return the first and last recorded WIB timestamps in a filtered row set."""
+    timestamps = [str(row.get('timestamp_wib', '') or '') for row in rows if row.get('timestamp_wib')]
+    if not timestamps:
+        return None, None
+
+    ordered = sorted(timestamps)
+    return ordered[0], ordered[-1]
+
+
+@app.route('/api/history')
+def api_history():
+    """Return raw logs and aggregated history metrics from SQLite."""
+    if state_manager is None:
+        return jsonify({'error': 'state_manager not initialized'}), 500
+
+    try:
+        scope = str(request.args.get('scope', 'all')).lower()
+        selected_date = str(request.args.get('date', '')).strip()
+        granularity = str(request.args.get('granularity', 'day')).lower()
+        interval_minutes = max(1, min(60, int(request.args.get('interval_minutes', 15))))
+        limit = max(1, min(500, int(request.args.get('limit', 80))))
+
+        if selected_date:
+            granularity = 'interval'
+
+        only_current_session = scope != 'all'
+        payload = state_manager.get_event_logs(only_current_session=only_current_session)
+        rows = payload.get('rows', [])
+        available_dates = _available_history_dates(rows)
+
+        if not selected_date and available_dates:
+            selected_date = available_dates[0]
+
+        if selected_date:
+            rows = [row for row in rows if _history_matches_date(row, selected_date)]
+
+        summary = _build_history_summary(
+            rows,
+            granularity=granularity,
+            selected_date=selected_date,
+            interval_minutes=interval_minutes,
+        )
+        first_event_at, last_event_at = _history_window_bounds(rows)
+        recent_rows = list(reversed(rows))[:limit]
+
+        return jsonify({
+            'scope': scope,
+            'granularity': granularity,
+            'interval_minutes': interval_minutes,
+            'selected_date': selected_date,
+            'available_dates': available_dates,
+            'first_event_at': first_event_at,
+            'last_event_at': last_event_at,
+            'database_file': str(config.DATABASE_FILE),
+            'database_tables': ['logs', 'app_state'],
+            'session_id': payload.get('session_id'),
+            'timezone': payload.get('timezone', 'Asia/Jakarta'),
+            'generated_at': _wib_now(),
+            'rows_total': len(rows),
+            'rows_returned': len(recent_rows),
+            'recent_rows': recent_rows,
+            **summary,
+        }), 200
+    except Exception as e:
+        logger.error('Error fetching history: %s', str(e))
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/history/export')
+def export_history_csv():
+    """Export filtered history rows as CSV."""
+    if state_manager is None:
+        return jsonify({'error': 'state_manager not initialized'}), 500
+
+    try:
+        scope = str(request.args.get('scope', 'all')).lower()
+        selected_date = str(request.args.get('date', '')).strip()
+        only_current_session = scope != 'all'
+
+        payload = state_manager.get_event_logs(only_current_session=only_current_session)
+        rows = payload.get('rows', [])
+        if selected_date:
+            rows = [row for row in rows if _history_matches_date(row, selected_date)]
+
+        csv_text = _history_csv_rows(rows)
+        filename_date = selected_date or 'all_history'
+        filename = f'edge_vision_history_{filename_date}.csv'
+
+        return Response(
+            csv_text,
+            mimetype='text/csv',
+            headers={
+                'Content-Disposition': f'attachment; filename={filename}',
+                'Cache-Control': 'no-store',
+            },
+        )
+    except Exception as e:
+        logger.error('Error exporting history CSV: %s', str(e))
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/stream')

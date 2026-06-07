@@ -17,7 +17,7 @@ CAMERAS = [
         "line_ratio": 0.5,  # 0.0 to 1.0 (50% of width for vertical, 50% of height for horizontal)
         "in_direction": "left_to_right",  # Options: 'left_to_right', 'right_to_left', 'top_to_bottom', 'bottom_to_top'
         "frame_skip": 3,  # Process every Nth frame for inference (1=every frame, 3=every 3rd)
-        "enabled": True,
+        "enabled": False,
     },
     {
         "id": "Cam_Pintu_Masuk_Depan",
@@ -26,7 +26,7 @@ CAMERAS = [
         "line_ratio": 0.5,  # 0.0 to 1.0 (50% of width for vertical, 50% of height for horizontal)
         "in_direction": "left_to_right",  # Options: 'left_to_right', 'right_to_left', 'top_to_bottom', 'bottom_to_top'
         "frame_skip": 3,  # Process every Nth frame for inference (1=every frame, 3=every 3rd)
-        "enabled": True,
+        "enabled": False,
     },
     {
         "id": "Cam_Pintu_Keluar_Samping_Kanan",
@@ -35,18 +35,18 @@ CAMERAS = [
         "line_ratio": 0.5,  # 0.0 to 1.0 (50% of width for vertical, 50% of height for horizontal)
         "in_direction": "left_to_right",  # Options: 'left_to_right', 'right_to_left', 'top_to_bottom', 'bottom_to_top'
         "frame_skip": 3,  # Process every Nth frame for inference (1=every frame, 3=every 3rd)
-        "enabled": True,
+        "enabled": False,
     },
     # Add more cameras here with the same structure:
-    # {
-    #     "id": "Cam_Ruang_Belakang",
-    #     "url": "http://192.168.68.101:8080/video",
-    #     "orientation": "vertical",
-    #     "line_ratio": 0.4,
-    #     "in_direction": "left_to_right",
-    #     "frame_skip": 3,
-    #     "enabled": True,
-    # },
+    {
+        "id": "Cam_Ruang_Belakang",
+        "url": "http://192.168.68.128:8080/video",
+        "orientation": "vertical",
+        "line_ratio": 0.4,
+        "in_direction": "left_to_right",
+        "frame_skip": 3,
+        "enabled": True,
+    },
 ]
 
 # Video capture - optimized for distant WiFi
